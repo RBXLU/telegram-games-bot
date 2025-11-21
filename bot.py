@@ -349,6 +349,119 @@ def flappy_callback(call):
         print("FLAPPY ERROR:", e)
         bot.answer_callback_query(call.id, "Ошибка игры Flappy")
 
+# ------------------- TTT HANDLER -------------------
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ttt_join_"))
+def ttt_join(call):
+    try:
+        host_id = int(call.data.split("_")[2])
+        guest_id = call.from_user.id
+
+        if host_id == guest_id:
+            bot.answer_callback_query(call.id, "Вы не можете играть сами с собой!")
+            return
+
+        gid = short_id()
+        inline_ttt_games[gid] = {
+            "board": [" "] * 9,
+            "turn": host_id,
+            "players": [host_id, guest_id]
+        }
+
+        markup = types.InlineKeyboardMarkup()
+        for i in range(0, 9, 3):
+            markup.row(
+                types.InlineKeyboardButton("⬜", callback_data=f"ttt_move_{gid}_{i}"),
+                types.InlineKeyboardButton("⬜", callback_data=f"ttt_move_{gid}_{i+1}"),
+                types.InlineKeyboardButton("⬜", callback_data=f"ttt_move_{gid}_{i+2}")
+            )
+
+        bot.edit_message_text(
+            "❌ и ⭕ игра началась!\nХодит игрок №1 (❌)",
+            inline_message_id=call.inline_message_id,
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id, "Вы присоединились!")
+    except Exception as e:
+        print("TTT JOIN ERROR:", e)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ttt_move_"))
+def ttt_move(call):
+    try:
+        _, gid, cell = call.data.split("_")
+        cell = int(cell)
+        game = inline_ttt_games.get(gid)
+        if not game:
+            bot.answer_callback_query(call.id, "Игра уже завершена!")
+            return
+
+        uid = call.from_user.id
+        if uid not in game["players"]:
+            bot.answer_callback_query(call.id, "Вы не участвуете в этой игре")
+            return
+
+        if uid != game["turn"]:
+            bot.answer_callback_query(call.id, "Сейчас не ваш ход!")
+            return
+
+        board = game["board"]
+        if board[cell] != " ":
+            bot.answer_callback_query(call.id, "Клетка уже занята!")
+            return
+
+        symbol = "❌" if uid == game["players"][0] else "⭕"
+        board[cell] = symbol
+
+        def win(b, s):
+            return ((b[0]==b[1]==b[2]==s) or
+                    (b[3]==b[4]==b[5]==s) or
+                    (b[6]==b[7]==b[8]==s) or
+                    (b[0]==b[3]==b[6]==s) or
+                    (b[1]==b[4]==b[7]==s) or
+                    (b[2]==b[5]==b[8]==s) or
+                    (b[0]==b[4]==b[8]==s) or
+                    (b[2]==b[4]==b[6]==s))
+
+        # win?
+        if win(board, symbol):
+            bot.edit_message_text(
+                f"🎉 Победил {symbol}!",
+                inline_message_id=call.inline_message_id
+            )
+            inline_ttt_games.pop(gid, None)
+            return
+
+        # draw?
+        if " " not in board:
+            bot.edit_message_text(
+                "🤝 Ничья!",
+                inline_message_id=call.inline_message_id
+            )
+            inline_ttt_games.pop(gid, None)
+            return
+
+        # next turn
+        game["turn"] = game["players"][1] if uid == game["players"][0] else game["players"][0]
+
+        markup = types.InlineKeyboardMarkup()
+        symbols_map = {" ": "⬜", "❌": "❌", "⭕": "⭕"}
+        for i in range(0, 9, 3):
+            markup.row(
+                types.InlineKeyboardButton(symbols_map[board[i]], callback_data=f"ttt_move_{gid}_{i}"),
+                types.InlineKeyboardButton(symbols_map[board[i+1]], callback_data=f"ttt_move_{gid}_{i+1}"),
+                types.InlineKeyboardButton(symbols_map[board[i+2]], callback_data=f"ttt_move_{gid}_{i+2}")
+            )
+
+        symbol_next = "❌" if game["turn"] == game["players"][0] else "⭕"
+        bot.edit_message_text(
+            f"Ходит {symbol_next}",
+            inline_message_id=call.inline_message_id,
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print("TTT MOVE ERROR:", e)
+
+
 # ------------------- 2048 -------------------
 def spawn_tile(board):
     empty = [(y, x) for y in range(4) for x in range(4) if board[y][x] == 0]
