@@ -97,6 +97,51 @@ def eng_keyboard():
     kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
     return kb
 
+# ------------------- TTT (улучшённый модуль) -------------------
+def _user_display_name_from_id(uid):
+    try:
+        u = bot.get_chat(uid)  # обычно работает для пользователей
+        name = u.username or (u.first_name or f"Player_{uid}")
+        return name
+    except Exception:
+        return f"Player_{uid}"
+
+def ttt_render_header(game):
+    p1_id, p2_id = game["players"][0], game["players"][1]
+    p1_name = game["names"].get(p1_id, _user_display_name_from_id(p1_id))
+    p2_name = game["names"].get(p2_id, _user_display_name_from_id(p2_id))
+    score1 = game["scores"].get(p1_id, 0)
+    score2 = game["scores"].get(p2_id, 0)
+    line1 = f"❌ {p1_name} — {score1}"
+    line2 = f"⭕ {p2_name} — {score2}"
+    turn_symbol = "❌" if game["turn"] == p1_id else "⭕"
+    return f"{line1}\n{line2}\n\nХодит: {turn_symbol}\n\n"
+
+def ttt_render_board(board):
+    # board - list of 9 entries: " ", "❌", "⭕"
+    lines = []
+    for r in range(3):
+        row = []
+        for c in range(3):
+            v = board[r*3 + c]
+            row.append(v if v.strip() else "⬜️")
+        lines.append(" ".join(row))
+    return "\n".join(lines)
+
+def ttt_build_keyboard(gid, board):
+    kb = types.InlineKeyboardMarkup()
+    symbols_map = {" ": "⬜️", "❌": "❌", "⭕": "⭕️"}
+    for r in range(3):
+        row = []
+        for c in range(3):
+            idx = r*3 + c
+            label = symbols_map.get(board[idx], "⬜️")
+            row.append(types.InlineKeyboardButton(label, callback_data=f"ttt_move_{gid}_{idx}"))
+        kb.row(*row)
+    # add restart button
+    kb.row(types.InlineKeyboardButton("🔁 Сыграть ещё", callback_data=f"ttt_restart_{gid}"))
+    return kb
+
 # ------------------- /start -------------------
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -353,114 +398,157 @@ def flappy_callback(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ttt_join_"))
 def ttt_join(call):
     try:
-        host_id = int(call.data.split("_")[2])
+        # data format: ttt_join_{host_id}
+        parts = call.data.split("_")
+        if len(parts) < 3:
+            bot.answer_callback_query(call.id, "Неверные данные.")
+            return
+        host_id = int(parts[2])
         guest_id = call.from_user.id
 
         if host_id == guest_id:
             bot.answer_callback_query(call.id, "Вы не можете играть сами с собой!")
             return
 
+        # create game id
         gid = short_id()
+
+        # try to fetch display names (store them now)
+        host_name = _user_display_name_from_id(host_id)
+        guest_name = call.from_user.username or call.from_user.first_name or f"Player_{guest_id}"
+
+        # initial game state: scores start at 0
         inline_ttt_games[gid] = {
             "board": [" "] * 9,
-            "turn": host_id,
-            "players": [host_id, guest_id]
+            "players": [host_id, guest_id],   # players[0] -> ❌, players[1] -> ⭕
+            "names": {host_id: host_name, guest_id: guest_name},
+            "scores": {host_id: 0, guest_id: 0},
+            # make guest (⭕) go first to match example "Ходит: ⭕"
+            "turn": guest_id
         }
 
-        markup = types.InlineKeyboardMarkup()
-        for i in range(0, 9, 3):
-            markup.row(
-                types.InlineKeyboardButton("⬜", callback_data=f"ttt_move_{gid}_{i}"),
-                types.InlineKeyboardButton("⬜", callback_data=f"ttt_move_{gid}_{i+1}"),
-                types.InlineKeyboardButton("⬜", callback_data=f"ttt_move_{gid}_{i+2}")
-            )
+        game = inline_ttt_games[gid]
+        text = ttt_render_header(game) + ttt_render_board(game["board"])
+        kb = ttt_build_keyboard(gid, game["board"])
 
-        bot.edit_message_text(
-            "❌ и ⭕ игра началась!\nХодит игрок №1 (❌)",
-            inline_message_id=call.inline_message_id,
-            reply_markup=markup
-        )
-        bot.answer_callback_query(call.id, "Вы присоединились!")
+        bot.edit_message_text(text, inline_message_id=call.inline_message_id, reply_markup=kb, parse_mode=None)
+        bot.answer_callback_query(call.id, "Игра началась! Удачи.")
     except Exception as e:
         print("TTT JOIN ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка при создании игры TTT.")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ttt_move_"))
 def ttt_move(call):
     try:
-        _, gid, cell = call.data.split("_")
-        cell = int(cell)
+        # data: ttt_move_{gid}_{cell}
+        parts = call.data.split("_")
+        if len(parts) < 4:
+            bot.answer_callback_query(call.id, "Неверные данные хода.")
+            return
+        gid = parts[2]
+        cell = int(parts[3])
         game = inline_ttt_games.get(gid)
         if not game:
-            bot.answer_callback_query(call.id, "Игра уже завершена!")
+            bot.answer_callback_query(call.id, "Игра не найдена или завершена.")
             return
 
         uid = call.from_user.id
         if uid not in game["players"]:
-            bot.answer_callback_query(call.id, "Вы не участвуете в этой игре")
+            bot.answer_callback_query(call.id, "Вы не участник этой игры.")
             return
 
         if uid != game["turn"]:
             bot.answer_callback_query(call.id, "Сейчас не ваш ход!")
             return
 
-        board = game["board"]
-        if board[cell] != " ":
+        if not (0 <= cell < 9):
+            bot.answer_callback_query(call.id, "Неверная клетка.")
+            return
+
+        if game["board"][cell].strip():
             bot.answer_callback_query(call.id, "Клетка уже занята!")
             return
 
+        # decide symbol
         symbol = "❌" if uid == game["players"][0] else "⭕"
-        board[cell] = symbol
+        game["board"][cell] = symbol
 
-        def win(b, s):
-            return ((b[0]==b[1]==b[2]==s) or
-                    (b[3]==b[4]==b[5]==s) or
-                    (b[6]==b[7]==b[8]==s) or
-                    (b[0]==b[3]==b[6]==s) or
-                    (b[1]==b[4]==b[7]==s) or
-                    (b[2]==b[5]==b[8]==s) or
-                    (b[0]==b[4]==b[8]==s) or
-                    (b[2]==b[4]==b[6]==s))
+        # check win
+        b = game["board"]
+        def win(bd, s):
+            patterns = [
+                (0,1,2),(3,4,5),(6,7,8),
+                (0,3,6),(1,4,7),(2,5,8),
+                (0,4,8),(2,4,6)
+            ]
+            for a,bp,c in patterns:
+                if bd[a] == bd[bp] == bd[c] == s:
+                    return True
+            return False
 
-        # win?
-        if win(board, symbol):
-            bot.edit_message_text(
-                f"🎉 Победил {symbol}!",
-                inline_message_id=call.inline_message_id
-            )
-            inline_ttt_games.pop(gid, None)
+        if win(b, symbol):
+            # increment winner score
+            winner_id = uid
+            game["scores"][winner_id] = game["scores"].get(winner_id, 0) + 1
+            title = f"🎉 Победил {symbol} — {game['names'].get(winner_id, _user_display_name_from_id(winner_id))}!"
+            # show final board and scores
+            text = title + "\n\n" + ttt_render_header(game) + ttt_render_board(game["board"])
+            # keep scores but reset board for next round only on restart; here we display final and keep game entry to allow restart
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🔁 Сыграть ещё", callback_data=f"ttt_restart_{gid}"))
+            bot.edit_message_text(text, inline_message_id=call.inline_message_id, reply_markup=kb)
+            # remove the game board but keep scores so restart can reuse
+            game["board"] = [" "] * 9
+            game["turn"] = game["players"][0]  # default who starts next (you can change)
+            bot.answer_callback_query(call.id, "Победа!")
             return
 
-        # draw?
-        if " " not in board:
-            bot.edit_message_text(
-                "🤝 Ничья!",
-                inline_message_id=call.inline_message_id
-            )
-            inline_ttt_games.pop(gid, None)
+        # check draw
+        if " " not in b:
+            text = "🤝 Ничья!\n\n" + ttt_render_header(game) + ttt_render_board(game["board"])
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("🔁 Сыграть ещё", callback_data=f"ttt_restart_{gid}"))
+            bot.edit_message_text(text, inline_message_id=call.inline_message_id, reply_markup=kb)
+            game["board"] = [" "] * 9
+            game["turn"] = game["players"][0]
+            bot.answer_callback_query(call.id, "Ничья!")
             return
 
         # next turn
         game["turn"] = game["players"][1] if uid == game["players"][0] else game["players"][0]
 
-        markup = types.InlineKeyboardMarkup()
-        symbols_map = {" ": "⬜", "❌": "❌", "⭕": "⭕"}
-        for i in range(0, 9, 3):
-            markup.row(
-                types.InlineKeyboardButton(symbols_map[board[i]], callback_data=f"ttt_move_{gid}_{i}"),
-                types.InlineKeyboardButton(symbols_map[board[i+1]], callback_data=f"ttt_move_{gid}_{i+1}"),
-                types.InlineKeyboardButton(symbols_map[board[i+2]], callback_data=f"ttt_move_{gid}_{i+2}")
-            )
-
-        symbol_next = "❌" if game["turn"] == game["players"][0] else "⭕"
-        bot.edit_message_text(
-            f"Ходит {symbol_next}",
-            inline_message_id=call.inline_message_id,
-            reply_markup=markup
-        )
-        bot.answer_callback_query(call.id)
+        # render updated board
+        text = ttt_render_header(game) + ttt_render_board(game["board"])
+        kb = ttt_build_keyboard(gid, game["board"])
+        bot.edit_message_text(text, inline_message_id=call.inline_message_id, reply_markup=kb)
+        bot.answer_callback_query(call.id, "Ход сделан.")
     except Exception as e:
         print("TTT MOVE ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка в ходе крестиков-ноликов.")
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ttt_restart_"))
+def ttt_restart(call):
+    try:
+        parts = call.data.split("_")
+        if len(parts) < 3:
+            bot.answer_callback_query(call.id, "Неверные данные рестарта.")
+            return
+        gid = parts[2]
+        game = inline_ttt_games.get(gid)
+        if not game:
+            bot.answer_callback_query(call.id, "Игра не найдена.")
+            return
+        # reset board but keep scores and names
+        game["board"] = [" "] * 9
+        # let O (players[1]) start next as before or alternate if you like
+        game["turn"] = game["players"][1]
+        text = ttt_render_header(game) + ttt_render_board(game["board"])
+        kb = ttt_build_keyboard(gid, game["board"])
+        bot.edit_message_text(text, inline_message_id=call.inline_message_id, reply_markup=kb)
+        bot.answer_callback_query(call.id, "Новая партия — удачи!")
+    except Exception as e:
+        print("TTT RESTART ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка при рестарте игры.")
 
 # ------------------- 2048 -------------------
 def spawn_tile(board):
