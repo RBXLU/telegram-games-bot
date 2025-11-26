@@ -146,8 +146,71 @@ def ttt_build_keyboard(gid, board):
 @bot.message_handler(commands=["start"])
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🎮 Играть")
-    bot.send_message(message.chat.id, "🎮 Привет! Выбери игру:", reply_markup=markup)
+    markup.add("❌ Крестики-нолики", "💰 Миллионер"),
+    markup.add("🐣 Пасхалка", "🪙 Орёл или решка")
+    markup.add("🖥 TELOS v1.0", "🔢 Угадай число")
+    markup.add("✂ Камень-ножницы-бумага", "🐍 Змейка")
+    markup.add("🎰 Казино", "🐦 Flappy Bird")
+    markup.add("🔢 2048", "🏓 Пинг-понг")
+    markup.add("🚀 Поддержать автора")
+    bot.send_message(message.chat.id, "🎮 Привет! Выбери игру:\n\nМало кто знает, но скоро будет возможность подключения через Telegram Premium!", reply_markup=markup)
+
+@bot.message_handler(func=lambda m: m.text == "❌ Крестики-нолики")
+def ttt(message):
+    bot.send_message(message.chat.id, "Чтобы играть в крестики-нолики - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "💰 Миллионер")
+def millionaire(message):
+    bot.send_message(message.chat.id, "Чтобы играть в миллионера - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🐣 Пасхалка")
+def pashalka(message):
+    bot.send_message(message.chat.id, "Чтобы запустить анимацию пасхалки - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🪙 Орёл или решка")
+def orel(message):
+    bot.send_message(message.chat.id, "Чтобы играть в орёл или решка - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🖥 TELOS v1.0")
+def telos(message):
+    bot.send_message(message.chat.id, "Чтобы запустить мини ос - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🔢 Угадай число")
+def ugadayka(message):
+    bot.send_message(message.chat.id, "Чтобы играть в угадай число - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "✂ Камень-ножницы-бумага")
+def rsp(message):
+    bot.send_message(message.chat.id, "Чтобы играть в камень ножницы бумага - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🐍 Змейка")
+def snake(message):
+    bot.send_message(message.chat.id, "Чтобы играть в змейку - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🎰 Казино")
+def casino(message):
+    bot.send_message(message.chat.id, "Чтобы запустить казино - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🐦 Flappy Bird")
+def flappybird(message):
+    bot.send_message(message.chat.id, "Чтобы играть в flappy Bird - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🔢 2048")
+def dvsorokvosem(message):
+    bot.send_message(message.chat.id, "Чтобы играть в 2048 - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(func=lambda m: m.text == "🏓 Пинг-понг")
+def pingpong(message):
+    bot.send_message(message.chat.id, "Чтобы играть в пинг-понг - напиши @animkabyrbxbot в любом чате!")
+
+@bot.message_handler(commands=["connect"])
+def connect(message):
+    bot.send_message(message.chat.id, "Внимание‼\n⚠ Данная функция сейчас в разработке.\n⚠ Для подключения бота требуется подписка Telegram Premium! Вы можете продолжать пользоватся ботом бесплатно через inline режим.\n\n<b>Как подключить бота?</b>\nИнструкция:\n1. Скопируйте имя <code>@animkabyrbxbot</code> нажав на него\n2. Перейдите в Настройки -> Telegram для бизнеса -> Чат-боты\n3. Вставьте скопированное имя и примените изменения\n‼️ Обратите внимание что оригинал бота будет первым в списке\n")
+
+@bot.message_handler(func=lambda m: m.text == "🚀 Поддержать автора")
+def support(message):
+        bot.send_message(message.chat.id, "Если вам нравится этот бот, вы можете поддержать автора отправив донат на карту:\n\n💳 <code>4441 1144 3356 7409</code>\n\nЗаранее cпасибо вашу поддержку!")
+
 
 @bot.message_handler(func=lambda m: m.text == "🎮 Играть")
 def play(message):
