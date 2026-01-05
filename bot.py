@@ -16,7 +16,7 @@ from groq import Groq
 
 
 # ---------- BOT SETUP ----------
-TOKEN = "8317148699:AAFZn4dZzKlBpivEKUYDbPcR4wL8iDgMMc8"
+TOKEN = "no token :)"
 bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
