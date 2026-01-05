@@ -1,3 +1,4 @@
+from unittest.mock import call
 import telebot
 from telebot import types
 import random
@@ -5,13 +6,215 @@ import time
 from threading import Thread
 from flask import Flask
 import html
+import json
+import threading
+from datetime import datetime, date
+import os
+from datetime import datetime, timedelta
+import uuid
+from groq import Groq
 
-# -----------------------------
-# ВАЖНО: Если токен был скомпрометирован, смените его в BotFather.
-# -----------------------------
+
+# ---------- BOT SETUP ----------
 TOKEN = "8592750651:AAFuvdC6AIEXzD_WbJrx0p5Bq9wPO23bfwA"
 bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
+
+# ---------- CONFIGURATION ----------
+GROQ_API_KEY = "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"
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+FREE_DAILY_QUOTA = 10
+PREMIUM_DAYS = 30
+
+DATA_FILE = "ai_users.json"
+# Название канала для обязательной подписки (если нужно)
+REQUIRED_CHANNEL = "@minigamesbottgk"  # или None
+
+# ---------- AI MODES ----------
+AI_MODES = {
+    "chat": "Обычный дружелюбный помощник",
+    "short": "Отвечай максимально кратко, 1–2 предложения",
+    "long": "Отвечай подробно и развернуто",
+    "code": "Ты опытный программист, пиши код и объясняй"
+}
+
+# Параметры тарифа
+FREE_DAILY_QUOTA = 10   # бесплатный тариф: 10 запросов в день
+PREMIUM_PRICE = 5       # произвольная метка; не производит оплату — логика "пометка"
+PREMIUM_PERIOD_DAYS = 30
+
+# Путь к файлу хранения данных
+DATA_FILE = "bot_data.json"
+
+_storage_lock = threading.Lock()
+
+def _ensure_data_file(path):
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"users": {}, "premium": {}, "ai_cache": {}, "stats": {}}, f, ensure_ascii=False, indent=2)
+
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump({"users": {}}, f)
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_user(uid):
+    data = load_data()
+    users = data["users"]
+    today = date.today().isoformat()
+
+    if str(uid) not in users:
+        users[str(uid)] = {
+            "count": 0,
+            "date": today,
+            "premium_until": 0,
+            "pending": {}
+        }
+
+    user = users[str(uid)]
+
+    if user["date"] != today:
+        user["date"] = today
+        user["count"] = 0
+
+    save_data(data)
+    return user
+
+def has_premium(uid):
+    user = get_user(uid)
+    return user["premium_until"] > time.time()
+
+def can_use_ai(uid):
+    user = get_user(uid)
+    if has_premium(uid):
+        return True, None
+    if user["count"] < FREE_DAILY_QUOTA:
+        return True, None
+    return False, "⚠️ Лимит 10 запросов в день. Купите премиум для неограниченного доступа."
+
+# Утилиты
+def get_user_record(user_id):
+    data = load_data()
+    users = data.setdefault("users", {})
+    return users.setdefault(str(user_id), {
+        "daily_count": 0,
+        "daily_date": date.today().isoformat(),
+        "is_premium": False,
+        "premium_until": None,
+    })
+
+def reset_daily_if_needed(user_id):
+    rec = get_user_record(user_id)
+    today = date.today().isoformat()
+    if rec.get("daily_date") != today:
+        rec["daily_date"] = today
+        rec["daily_count"] = 0
+        d = load_data()
+        d["users"][str(user_id)] = rec
+        save_data(d)
+
+def inc_user_count(user_id):
+    d = load_data()
+    rec = d.setdefault("users", {}).setdefault(str(user_id), {"daily_count":0,"daily_date":date.today().isoformat(),"is_premium":False})
+    # reset if needed
+    if rec.get("daily_date") != date.today().isoformat():
+        rec["daily_date"] = date.today().isoformat()
+        rec["daily_count"] = 0
+    rec["daily_count"] = rec.get("daily_count",0) + 1
+    d["users"][str(user_id)] = rec
+    save_data(d)
+    return rec["daily_count"]
+
+def set_premium(user_id, until_timestamp):
+    d = load_data()
+    d.setdefault("premium", {})[str(user_id)] = {"until": until_timestamp}
+    # also set users field
+    user = d.setdefault("users", {}).setdefault(str(user_id), {})
+    user["is_premium"] = True
+    user["premium_until"] = until_timestamp
+    save_data(d)
+
+def clear_premium(user_id):
+    d = load_data()
+    if str(user_id) in d.get("premium", {}):
+        del d["premium"][str(user_id)]
+    user = d.setdefault("users", {}).setdefault(str(user_id), {})
+    user["is_premium"] = False
+    user["premium_until"] = None
+    save_data(d)
+    
+def has_active_premium(user_id):
+    d = load_data()
+    user = d.get("users", {}).get(str(user_id), {})
+    until = user.get("premium_until")
+    if not until:
+        return False
+    try:
+        return datetime.fromtimestamp(until) > datetime.utcnow()
+    except:
+        return False
+
+def start_premium_watcher(bot_instance, check_interval=3600):
+    """Фоновой поток: каждую check_interval сек проверяет премиум-аккаунты и шлет напоминания за 24h и при окончании."""
+    def watcher():
+        while True:
+            try:
+                data = load_data()
+                pm = data.get("premium", {})
+                now = datetime.utcnow()
+                for uid_str, info in list(pm.items()):
+                    try:
+                        until_ts = info.get("until")
+                        if not until_ts:
+                            continue
+                        until_dt = datetime.fromtimestamp(until_ts)
+                        diff = until_dt - now
+                        uid = int(uid_str)
+                        # за 24 часа — напоминание
+                        if 0 < diff.total_seconds() <= 24*3600 and not info.get("reminded_24h"):
+                            try:
+                                bot_instance.send_message(uid, f"⚠️ Ваша премиум-подписка истекает {until_dt.isoformat()} UTC. Продлите, чтобы не потерять доступ.")
+                            except Exception as e:
+                                print("notify 24h fail", e)
+                            info["reminded_24h"] = True
+                        # истекло — уведомляем и помечаем как неактивное
+                        if diff.total_seconds() <= 0:
+                            try:
+                                bot_instance.send_message(uid, "⚠️ Ваша премиум-подписка окончена. Пока не продлите — премиум приостановлен.")
+                            except Exception as e:
+                                print("notify expired fail", e)
+                            # удаляем/обнуляем
+                            clear_premium(uid)
+                            if str(uid) in pm:
+                                del pm[str(uid)]
+                    except Exception as e:
+                        print("premium loop inner error", e)
+                data["premium"] = pm
+                save_data(data)
+            except Exception as e:
+                print("premium watcher error", e)
+            time.sleep(check_interval)
+    t = Thread(target=watcher, daemon=True)
+    t.start()
+    
+def user_quota_allows(user_id):
+    reset_daily_if_needed(user_id)
+    rec = get_user_record(user_id)
+
+    if has_active_premium(user_id):
+        return True, None
+
+    if rec.get("daily_count", 0) < FREE_DAILY_QUOTA:
+        return True, None
+
+    return False, f"⚠️ Лимит бесплатных запросов достигнут ({FREE_DAILY_QUOTA}/день). Купите премиум."
 
 # ------------------- QUESTIONS -------------------
 questions = [
@@ -54,13 +257,17 @@ inline_rps_games = {}
 inline_snake_games = {}
 inline_coin_games = {}
 inline_slot_games = {}
-
+# ---------------- SYSTEM NOTIFICATION STORAGE ----------------
+user_sys_settings = {}      # uid -> {msg, btn, title, gui}
+system_notify_wait = {}     # uid -> "field"
 millionaire_games = {}   # short_id -> {"question":..., "attempts":int}
 
 # in-memory games
 games_flappy = {}   # gid -> {"bird_y":int,"pipes":[(x,gap)],"score":int}
 games_2048 = {}     # gid -> {"board": [[int]]}
 games_pong = {}     # gid -> {"players":[id_or_None,id_or_None],"paddles":[y1,y2],"ball":[x,y,dx,dy],"started":bool}
+user_ai_mode = {}  # user_id -> mode
+
 
 # ------------------- HELPERS -------------------
 def short_id():
@@ -96,6 +303,30 @@ def eng_keyboard():
         kb.add(*[types.InlineKeyboardButton(k, callback_data=f"key_{k}") for k in row])
     kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
     return kb
+
+def ask_ai(prompt: str, user_id: int) -> str:
+    try:
+        if not prompt.strip():
+            return "⚠️ Напиши вопрос текстом"
+
+        mode = user_ai_mode.get(user_id, "chat")
+        system_prompt = AI_MODES.get(mode, AI_MODES["chat"])
+
+        chat = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt[:2000]}
+            ],
+            temperature=0.7,
+            max_tokens=900
+        )
+
+        return chat.choices[0].message.content
+
+    except Exception as e:
+        print("AI ERROR:", repr(e))
+        return "❌ Ошибка при получении ответа"
 
 # ------------------- TTT (улучшённый модуль) -------------------
 def _user_display_name_from_id(uid):
@@ -154,6 +385,45 @@ def start(message):
     markup.add("🔢 2048", "🏓 Пинг-понг")
     markup.add("🚀 Поддержать автора")
     bot.send_message(message.chat.id, "🎮 Привет! Выбери игру:\n\nМало кто знает, но скоро будет возможность подключения через Telegram Premium!", reply_markup=markup)
+
+@bot.message_handler(commands=["settext"])
+def settext_cmd(message):
+    uid = message.from_user.id
+
+    if uid not in user_sys_settings:
+        user_sys_settings[uid] = {
+            "msg": "Ваше сообщение",
+            "btn": "ОК",
+            "title": "Заголовок",
+            "gui": "Текст внутри GUI"
+        }
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("1. Изменить текст сообщения", callback_data="set_msg"))
+    kb.add(types.InlineKeyboardButton("2. Изменить текст кнопки", callback_data="set_btn"))
+    kb.add(types.InlineKeyboardButton("3. Изменить заголовок GUI", callback_data="set_title"))
+    kb.add(types.InlineKeyboardButton("4. Изменить текст GUI", callback_data="set_gui"))
+
+    bot.send_message(
+        message.chat.id,
+        "🔧 *Настройки системного уведомления*\nВыбери, что изменить:",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+@bot.message_handler(commands=["mode"])
+def set_mode(message):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("💬 Чат", callback_data="mode_chat"))
+    kb.add(types.InlineKeyboardButton("⚡ Кратко", callback_data="mode_short"))
+    kb.add(types.InlineKeyboardButton("🧠 Подробно", callback_data="mode_long"))
+    kb.add(types.InlineKeyboardButton("💻 Код", callback_data="mode_code"))
+
+    bot.send_message(
+        message.chat.id,
+        "🎛 Выбери режим ответа AI:",
+        reply_markup=kb
+    )
 
 @bot.message_handler(func=lambda m: m.text == "❌ Крестики-нолики")
 def ttt(message):
@@ -216,6 +486,50 @@ def support(message):
 def play(message):
     bot.send_message(message.chat.id, "Чтобы играть — используй инлайн через @YourBotUsername в любом чате!")
 
+@bot.inline_handler(lambda q: q.query.strip() != "")
+def ai_inline(query):
+    uid = query.from_user.id
+    text = query.query.strip()
+
+    allow, err = can_use_ai(uid)
+    if not allow:
+        bot.answer_inline_query(
+            query.id,
+            [types.InlineQueryResultArticle(
+                id="nope",
+                title="⚠️ Лимит",
+                input_message_content=types.InputTextMessageContent(err)
+            )],
+            cache_time=1,
+            is_personal=True
+        )
+        return
+
+    req_id = uuid.uuid4().hex
+    data = load_data()
+    data["users"][str(uid)]["pending"][req_id] = {
+        "q": text,
+        "a": None,
+        "status": "wait"
+    }
+    save_data(data)
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("📩 Получить ответ", callback_data=f"ai_{uid}_{req_id}"))
+
+    result = types.InlineQueryResultArticle(
+        id=req_id,
+        title="🤖 Спросить ChatGPT",
+        description=text[:60],
+        input_message_content=types.InputTextMessageContent(
+            f"💬 *Вопрос:*\n{text}",
+            parse_mode="Markdown"
+        ),
+        reply_markup=kb
+    )
+
+    bot.answer_inline_query(query.id, [result], cache_time=1, is_personal=True)
+
 # ------------------- INLINE MAIN (empty query) -------------------
 @bot.inline_handler(lambda q: q.query.strip() == "")
 def inline_handler(query):
@@ -224,6 +538,8 @@ def inline_handler(query):
         user_name = html.escape(user.first_name or "Игрок")
         starter_id = user.id
         results = []
+
+
 
         # TTT
         join_markup = types.InlineKeyboardMarkup()
@@ -297,6 +613,29 @@ def inline_handler(query):
             reply_markup=guess_m
         ))
 
+        # ---------- SYSTEM NOTIFICATION (inline preview) ----------
+        # Если пользователь уже сохранил своё уведомление в ЛС через /settext -> set_...
+        u_uid = query.from_user.id
+        if u_uid in user_sys_settings:
+            data = user_sys_settings[u_uid]
+            # показываем только если хотя бы есть заголовок или текст — это настраиваемо
+            if data.get("title") or data.get("msg"):
+                sys_preview_id = short_id()
+                btn_text = data.get("btn") or "Открыть"
+                markup_sys = types.InlineKeyboardMarkup()
+                # при клике откроется GUI автора (мы используем callback sysopen_{uid})
+                markup_sys.add(types.InlineKeyboardButton(btn_text, callback_data=f"sysopen_{u_uid}"))
+                results.append(types.InlineQueryResultArticle(
+                    id=f"sys_{sys_preview_id}",
+                    title="🔔 Системное уведомление",
+                    description="Ваше сохранённое уведомление",
+                    input_message_content=types.InputTextMessageContent(
+                        f"🔔 *{data.get('title','Системное уведомление')}*\n{data.get('msg','')}",
+                        parse_mode="Markdown"
+                    ),
+                    reply_markup=markup_sys
+                ))
+
         # RPS
         rps_m = types.InlineKeyboardMarkup()
         rps_m.row(
@@ -368,6 +707,8 @@ def inline_handler(query):
             input_message_content=types.InputTextMessageContent("🏓 Пинг-понг\nНажмите 'Присоединиться' чтобы игра началась."),
             reply_markup=pm
         ))
+
+
 
         bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
 
@@ -456,6 +797,77 @@ def flappy_callback(call):
     except Exception as e:
         print("FLAPPY ERROR:", e)
         bot.answer_callback_query(call.id, "Ошибка игры Flappy")
+
+# ------------------- AI HANDLER -------------------
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ai_"))
+def ai_callback(call):
+    try:
+        _, uid, rid = call.data.split("_")
+        uid = int(uid)
+
+        data = load_data()
+        user = data["users"].get(str(uid))
+        if not user:
+            bot.answer_callback_query(call.id, "Данные пользователя не найдены")
+            return
+
+        req = user["pending"].get(rid)
+        if not req:
+            bot.answer_callback_query(call.id, "Запрос устарел")
+            return
+
+        # если ещё не считали — запускаем
+        if req["status"] == "wait":
+            req["status"] = "process"
+            save_data(data)
+
+            def work():
+                try:
+                    prompt = req["q"]
+                    answer = ask_ai(prompt, uid)
+                    inc_user_count(uid)
+                
+                    req["a"] = answer
+                    req["status"] = "done"
+                    save_data(data)
+
+                except Exception as e:
+                    req["a"] = f"Ошибка AI: {e}"
+                    req["status"] = "done"
+                    save_data(data)
+
+            Thread(target=work, daemon=True).start()
+            bot.answer_callback_query(call.id, "⏳ Готовлю ответ…")
+            return
+
+        # если готово
+        if req["status"] == "done":
+            answer = req["a"]
+
+            # 🔹 КОРОТКИЙ → alert
+            if len(answer) <= 180:
+                bot.answer_callback_query(call.id, "✅ Ответ готов!")
+                bot.send_message(call.from_user.id, f"🤖 Ответ:\n\n{answer[:4000]}")
+
+                return
+
+            # 🔹 ДЛИННЫЙ → редактируем inline сообщение
+            text = (
+                "🤖 *Ответ ChatGPT:*\n\n"
+                + answer[:3900]  # запас
+            )
+
+            bot.edit_message_text(
+                text,
+                inline_message_id=call.inline_message_id,
+                parse_mode="Markdown"
+            )
+            bot.answer_callback_query(call.id)
+            return
+
+    except Exception as e:
+        print("AI CALLBACK ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка при получении ответа")
 
 # ------------------- TTT HANDLER -------------------
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ttt_join_"))
@@ -720,6 +1132,16 @@ def inline_2048(query):
         reply_markup=markup
     )]
     bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
+
+@bot.callback_query_handler(func=lambda c: c.data in ["set_msg", "set_btn", "set_title", "set_gui"])
+def sys_set_field(call):
+    field = call.data.replace("set_", "")  # msg, btn, title, gui
+    uid = call.from_user.id
+
+    system_notify_wait[uid] = field
+    bot.answer_callback_query(call.id)
+    bot.send_message(uid, f"✏ Введите новое значение для поля: {field}")
+
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("g2048_"))
 def g2048_callback(call):
@@ -1007,6 +1429,20 @@ def easter_inline(call):
     bot.answer_callback_query(call.id, "🐣 Пасхалка!")
     Thread(target=play_inline_easter_egg, args=(call.inline_message_id,)).start()
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sysopen_"))
+def sys_open(call):
+    uid = int(call.data.split("_")[1])
+
+    if uid not in user_sys_settings:
+        bot.answer_callback_query(call.id, "Данные не найдены.")
+        return
+
+    gui_text = user_sys_settings[uid].get("gui", "Пусто")
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(call.from_user.id, f"📌 *GUI окно:*\n{gui_text}", parse_mode="Markdown")
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "coin_flip")
 def coin_flip(call):
     res = random.choice(["🪙 Орёл","🪙 Решка"])
@@ -1053,6 +1489,18 @@ def play_inline_easter_egg(inline_id):
         except:
             break
 
+@bot.message_handler(func=lambda m: m.from_user.id in system_notify_wait)
+def sys_save_value(message):
+    uid = message.from_user.id
+    field = system_notify_wait.pop(uid)
+
+    if uid not in user_sys_settings:
+        user_sys_settings[uid] = {"msg": "", "btn": "", "title": "", "gui": ""}
+
+    user_sys_settings[uid][field] = message.text
+    bot.send_message(uid, "✅ Сохранено!")
+
+
 # ------------------- Flask keepalive -------------------
 app = Flask('')
 @app.route('/')
@@ -1068,6 +1516,7 @@ def keep_alive():
 
 # ------------------- START -------------------
 if __name__ == "__main__":
+    start_premium_watcher(bot)  # запустится фоновой нитью
     Thread(target=run_flask).start()
     Thread(target=keep_alive, daemon=True).start()
     print("✅ Бот запущен")
