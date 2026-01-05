@@ -16,12 +16,12 @@ from groq import Groq
 
 
 # ---------- BOT SETUP ----------
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = "8317148699:AAFZn4dZzKlBpivEKUYDbPcR4wL8iDgMMc8"
 bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
 # ---------- CONFIGURATION ----------
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY = "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"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 FREE_DAILY_QUOTA = 10
