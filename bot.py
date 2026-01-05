@@ -21,7 +21,7 @@ bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
 # ---------- CONFIGURATION ----------
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "no groq token :)"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 FREE_DAILY_QUOTA = 10
