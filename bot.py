@@ -1,4 +1,3 @@
-
 from unittest.mock import call
 import telebot
 from telebot import types
@@ -16,12 +15,12 @@ import uuid
 from groq import Groq
 
 # ---------- BOT SETUP ----------
-TOKEN = 
+TOKEN = "8317148699:AAFZn4dZzKlBpivEKUYDbPcR4wL8iDgMMc8"
 bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
 # ---------- CONFIGURATION ----------
-GROQ_API_KEY = 
+GROQ_API_KEY = "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"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 FREE_DAILY_QUOTA = 10
@@ -519,7 +518,7 @@ def main_menu_keyboard():
     kb.add("🐦 Flappy Bird", "🔢 2048")
     kb.add("🏓 Пинг-понг", "🕵️‍♀️ Прятки")
     kb.add("🔤 Виселица", "🔤 Викторина")
-    kb.add("⚡ Комбо-битва")
+    kb.add("⚡ Комбо-битва", "🔔 Ваше уведомление")
     kb.add("🚀 Поддержать автора")
     return kb
 
@@ -683,12 +682,12 @@ def settext_cmd(message):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("1. Изменить текст сообщения", callback_data="set_msg"))
     kb.add(types.InlineKeyboardButton("2. Изменить текст кнопки", callback_data="set_btn"))
-    kb.add(types.InlineKeyboardButton("3. Изменить заголовок GUI", callback_data="set_title"))
-    kb.add(types.InlineKeyboardButton("4. Изменить текст GUI", callback_data="set_gui"))
+    kb.add(types.InlineKeyboardButton("3. Изменить заголовок сообщения", callback_data="set_title"))
+    kb.add(types.InlineKeyboardButton("4. Изменить текст popup-окна", callback_data="set_gui"))
 
     bot.send_message(
         message.chat.id,
-        "🔧 *Настройки системного уведомления*\nВыбери, что изменить:",
+        "🔧 *Настройки системного уведомления*\nВыберите, что изменить:",
         reply_markup=kb,
         parse_mode="Markdown"
     )
@@ -710,7 +709,7 @@ def messagenot_cmd(message):
     kb.add(types.InlineKeyboardButton("2. Изменить текст кнопки", callback_data="messagenot_btn"))
     kb.add(types.InlineKeyboardButton("3. Изменить тип кнопки", callback_data="messagenot_type"))
     kb.add(types.InlineKeyboardButton("4. Отправить всем", callback_data="messagenot_send"))
-    bot.send_message(message.chat.id, "⚙️ Редактор системного сообщения — выберите действие:", reply_markup=kb)
+    bot.send_message(message.chat.id, "⚙️ Настройки рассылки — выберите действие:", reply_markup=kb)
 
 
 @bot.callback_query_handler(func=lambda c: c.data in ("messagenot_msg","messagenot_btn","messagenot_type","messagenot_send"))
@@ -768,7 +767,7 @@ def messagenot_callback(call):
                     time.sleep(0.05)
                 except Exception:
                     skipped += 1
-            bot.send_message(uid, f"Готово. Отправлено: {sent}, пропущено: {skipped}")
+            bot.send_message(uid, f"Готово. Доставлено: {sent}, пропущено: {skipped}")
             return
     except Exception as e:
         print("MESSAGENOT ERROR:", e)
@@ -797,7 +796,7 @@ def messagenot_type_choice(call):
             except Exception:
                 pass
             bot.answer_callback_query(call.id, "Готово — кнопка будет убрана из рассылки.")
-            bot.send_message(uid, "✅ Тип кнопки: без кнопки. При следующей рассылке кнопка не будет добавлена.")
+            bot.send_message(uid, "✅ Тип кнопки: без кнопки. При рассылке кнопка не будет отображаться.")
             return
     except Exception as e:
         print("TYPE CHOICE ERROR", e)
@@ -876,6 +875,10 @@ def pashalka(message):
 @bot.message_handler(func=lambda m: m.text == "🪙 Орёл или решка")
 def orel(message):
     bot.send_message(message.chat.id, "Чтобы играть в орёл или решка - напиши <code>@minigamesisbot</code> в любом чате!", parse_mode="HTML")
+
+@bot.message_handler(func=lambda m: m.text == "🔔 Ваше уведомление")
+def notification(message):
+    bot.send_message(message.chat.id, "Чтобы настроить системное уведомление - напиши <code>/messagenot</code>", parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🖥 TELOS v1.0")
 def telos(message):
@@ -1083,13 +1086,13 @@ def inline_handler(query):
                 btn_text = data.get("btn") or "Открыть"
                 markup_sys = types.InlineKeyboardMarkup()
                 # при клике откроется GUI автора (мы используем callback sysopen_{uid})
-                markup_sys.add(types.InlineKeyboardButton(btn_text, callback_data=f"sysopen_{u_uid}"))
+                markup_sys.add(types.InlineKeyboardButton(btn_text, callback_data=f"sysopen_{u_uid}_{sys_preview_id}"))
                 results.append(types.InlineQueryResultArticle(
                     id=f"sys_{sys_preview_id}",
-                    title="🔔 Системное уведомление",
+                    title="Системное уведомление",
                     description="Ваше сохранённое уведомление",
                     input_message_content=types.InputTextMessageContent(
-                        f"🔔 *{data.get('title','Системное уведомление')}*\n{data.get('msg','')}",
+                        f"*{data.get('title','Системное уведомление')}*\n{data.get('msg','')}",
                         parse_mode="Markdown"
                     ),
                     reply_markup=markup_sys
@@ -2918,7 +2921,7 @@ def quizgame_join(call):
                 text += f"{p1_name}\n\n"
                 text += f"Нажмите «Присоединиться», чтобы начать игру."
                 safe_edit_message(call, text, reply_markup=kb, parse_mode="Markdown")
-            bot.answer_callback_query(call.id, "Ожидаем игроков", show_alert=True)
+            bot.answer_callback_query(call.id, "Ожидаем игроков", show_alert=False)
             return
 
         if game.get("locked"):
@@ -2926,7 +2929,7 @@ def quizgame_join(call):
             return
 
         if len(players) >= max_players:
-            bot.answer_callback_query(call.id, "Игра заполнена (максимум 4)", show_alert=True)
+            bot.answer_callback_query(call.id, "Игра заполнена (максимум 4)", show_alert=False)
             return
 
         uid = call.from_user.id
@@ -2987,7 +2990,7 @@ def quizgame_start(call):
             bot.answer_callback_query(call.id, "Только создатель может начать", show_alert=True)
             return
         if len(game.get("players", [])) < 2:
-            bot.answer_callback_query(call.id, "Нужно минимум 2 игрока", show_alert=True)
+            bot.answer_callback_query(call.id, "Нужно минимум 2 игрока", show_alert=False)
             return
         game["started"] = True
 
@@ -3069,17 +3072,17 @@ def quiz_input(call):
             return
 
         if not game.get("started"):
-            bot.answer_callback_query(call.id, "Ждём игроков...", show_alert=True)
+            bot.answer_callback_query(call.id, "Ждём игроков...", show_alert=False)
             return
 
         if game["answered"].get(uid):
-            bot.answer_callback_query(call.id, "Вы уже ответили", show_alert=True)
+            bot.answer_callback_query(call.id, "Вы уже ответили", show_alert=False)
             return
 
         if token == "submit":
             answer = (game["inputs"].get(uid, "") or "").strip().lower()
             if not answer:
-                bot.answer_callback_query(call.id, "Введите ответ", show_alert=True)
+                bot.answer_callback_query(call.id, "Введите ответ", show_alert=False)
                 return
 
             game["locked"] = True
@@ -3112,7 +3115,7 @@ def quiz_input(call):
         else:
             cur = game["inputs"].get(uid, "")
             if len(cur) >= 32:
-                bot.answer_callback_query(call.id, "Слишком длинный ответ", show_alert=True)
+                bot.answer_callback_query(call.id, "Слишком длинный ответ", show_alert=False)
                 return
             game["inputs"][uid] = cur + token
 
@@ -3165,7 +3168,7 @@ def combogame_join(call):
             text += f"{p1_name}\n\n"
             text += f"Нажмите «Присоединиться», чтобы начать игру."
             safe_edit_message(call, text, reply_markup=kb, parse_mode="Markdown")
-            bot.answer_callback_query(call.id, "Ожидаем второго игрока", show_alert=True)
+            bot.answer_callback_query(call.id, "Ожидаем второго игрока", show_alert=False)
             return
 
         if game["p2"] is None:
@@ -3196,7 +3199,7 @@ def combogame_join(call):
             bot.edit_message_text(text, inline_message_id=call.inline_message_id, parse_mode="Markdown", reply_markup=kb)
             bot.answer_callback_query(call.id, "✅ Вы присоединились!")
         else:
-            bot.answer_callback_query(call.id, "Игрок уже присоединился", show_alert=True)
+            bot.answer_callback_query(call.id, "Игрок уже присоединился", show_alert=False)
     except Exception as e:
         print("COMBOGAME JOIN ERROR:", e)
         bot.answer_callback_query(call.id, "Ошибка")
@@ -3222,7 +3225,7 @@ def combo_choice(call):
         # Определяем кто игрок
         if uid == game["p1"]:
             if game.get("p2") is None:
-                bot.answer_callback_query(call.id, "Ждём второго игрока", show_alert=True)
+                bot.answer_callback_query(call.id, "Ждём второго игрока", show_alert=False)
                 return
             if game["p1_choice"] is None:
                 game["p1_choice"] = choice
@@ -3291,11 +3294,11 @@ def combo_choice(call):
                     )
                     bot.edit_message_text(text, inline_message_id=call.inline_message_id, parse_mode="Markdown", reply_markup=kb)
             else:
-                bot.answer_callback_query(call.id, "Вы уже выбрали!", show_alert=True)
+                bot.answer_callback_query(call.id, "Вы уже выбрали!", show_alert=False)
         
         elif uid == game["p2"]:
             if game.get("p1") is None:
-                bot.answer_callback_query(call.id, "Ждём первого игрока", show_alert=True)
+                bot.answer_callback_query(call.id, "Ждём первого игрока", show_alert=False)
                 return
             if game["p2_choice"] is None:
                 game["p2_choice"] = choice
@@ -3363,7 +3366,7 @@ def combo_choice(call):
                     )
                     bot.edit_message_text(text, inline_message_id=call.inline_message_id, parse_mode="Markdown", reply_markup=kb)
             else:
-                bot.answer_callback_query(call.id, "Вы уже выбрали!", show_alert=True)
+                bot.answer_callback_query(call.id, "Вы уже выбрали!", show_alert=False)
     except Exception as e:
         print("COMBO CHOICE ERROR:", e)
         bot.answer_callback_query(call.id, "Ошибка")
@@ -3471,16 +3474,20 @@ def easter_inline(call):
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sysopen_"))
 def sys_open(call):
-    uid = int(call.data.split("_")[1])
+    try:
+        parts = call.data.split("_", 2)  # sysopen_{owner_uid}_{sid}
+        owner_uid = int(parts[1])
+        if owner_uid not in user_sys_settings:
+            bot.answer_callback_query(call.id, "Данные не найдены.")
+            return
 
-    if uid not in user_sys_settings:
-        bot.answer_callback_query(call.id, "Данные не найдены.")
-        return
-
-    gui_text = user_sys_settings[uid].get("gui", "Пусто")
-
-    bot.answer_callback_query(call.id)
-    bot.send_message(call.from_user.id, f"📌 *GUI окно:*\n{gui_text}", parse_mode="Markdown")
+        gui_text = user_sys_settings[owner_uid].get("gui", "Пусто")
+        # Telegram alert text is limited; trim to avoid API errors.
+        alert_text = gui_text[:190] if len(gui_text) > 190 else gui_text
+        bot.answer_callback_query(call.id, alert_text or "Пусто", show_alert=True)
+    except Exception as e:
+        print("SYS OPEN ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "coin_flip")
