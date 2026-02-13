@@ -20,7 +20,7 @@ bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
 # ---------- CONFIGURATION ----------
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "no key"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 FREE_DAILY_QUOTA = 10
@@ -878,7 +878,7 @@ def orel(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔔 Ваше уведомление")
 def notification(message):
-    bot.send_message(message.chat.id, "Чтобы настроить системное уведомление - напиши <code>/messagenot</code>", parse_mode="HTML")
+    bot.send_message(message.chat.id, "Чтобы настроить системное уведомление - напиши <code>/settext</code>", parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🖥 TELOS v1.0")
 def telos(message):
