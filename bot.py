@@ -16,12 +16,12 @@ from groq import Groq
 from bussines_bot import register_business_handlers
 
 # ---------- BOT SETUP ----------
-TOKEN = "8317148699:AAFZn4dZzKlBpivEKUYDbPcR4wL8iDgMMc8"
+TOKEN = "8413993403:AAFL8-2J4byWxkEwvvTFzuQ05Pcs6ypncn8"
 bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
 # ---------- CONFIGURATION ----------
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 FREE_DAILY_QUOTA = 10
@@ -626,7 +626,7 @@ def _telos_save_state(user_id, state):
 def _telos_home_text(user_id):
     st = _telos_get_state(user_id)
     return (
-        f"🖥 *{st['settings'].get('os_name', 'TELOS')} v1.0*\n"
+        f"🖥 *{st['settings'].get('os_name', 'TELOS')} v1.1*\n"
         f"👤 ID пользователя: `{user_id}`\n\n"
         f"📁 Файлов: {len(st.get('files', []))}\n"
         f"📝 Заметок: {len(st.get('notes', []))}\n"
@@ -3609,7 +3609,7 @@ def mafia_callback(call):
             game["roles"] = mafia_assign_roles(game["players"])
             game["phase"] = "night"
             game["last_event"] = "Игра началась. Наступила ночь."
-            safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_night_kb(gid))
+            safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_night_kb(gid, game))
             bot.answer_callback_query(call.id, "Старт")
             return
 
@@ -3700,7 +3700,7 @@ def mafia_callback(call):
                     game["last_event"] += "\n🏁 Победили " + ("мирные" if winner == "citizens" else "мафия")
                     safe_edit_message(call, mafia_render_text(game))
                 else:
-                    safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_night_kb(gid))
+                    safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_night_kb(gid, game))
             return
 
         bot.answer_callback_query(call.id)
@@ -3814,8 +3814,7 @@ def quizgame_join(call):
             game["answered"] = game.get("answered", {})
             game["correct"] = game.get("correct", {})
             game["max_players"] = 4
-            # Do not auto-start on 2 players; only owner starts via button.
-            game["started"] = game.get("started", False)
+            game["started"] = len(players) >= 2
             game["locked"] = False
             game["owner"] = players[0] if players else None
 
@@ -3829,7 +3828,7 @@ def quizgame_join(call):
                 p1_name = names.get(players[0], "Игрок 1")
                 kb = types.InlineKeyboardMarkup()
                 kb.add(types.InlineKeyboardButton("Присоединиться", callback_data=f"quizgame_join_{gid}"))
-                if len(players) >= 2:
+                if owner == call.from_user.id:
                     kb.add(types.InlineKeyboardButton("▶️ Старт", callback_data=f"quizgame_start_{gid}"))
                 text = f"🧠 *Викторина*\n\n"
                 text += f"❓ {game['question']}\n\n"
@@ -3855,9 +3854,8 @@ def quizgame_join(call):
         game["answered"].setdefault(uid, False)
         game["correct"].setdefault(uid, False)
 
-        # Keep lobby state until owner explicitly presses Start.
-        if "started" not in game:
-            game["started"] = False
+        if len(players) >= 2:
+            game["started"] = True
 
         text = f"🧠 *Викторина*\n\n"
         text += f"❓ {game['question']}\n\n"
@@ -3885,7 +3883,7 @@ def quizgame_join(call):
                    types.InlineKeyboardButton("✅ Готово", callback_data=f"quiz_{gid}_submit"))
         else:
             kb.add(types.InlineKeyboardButton("Присоединиться", callback_data=f"quizgame_join_{gid}"))
-            if len(players) >= 2:
+            if owner == call.from_user.id:
                 kb.add(types.InlineKeyboardButton("▶️ Старт", callback_data=f"quizgame_start_{gid}"))
 
         safe_edit_message(call, text, reply_markup=kb, parse_mode="Markdown")
@@ -3976,8 +3974,7 @@ def quiz_input(call):
             game["answered"] = game.get("answered", {})
             game["correct"] = game.get("correct", {})
             game["max_players"] = 4
-            # Do not auto-start migrated games.
-            game["started"] = game.get("started", False)
+            game["started"] = len(players) >= 2
             game["locked"] = False
             game["owner"] = players[0] if players else None
 
