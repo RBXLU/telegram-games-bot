@@ -13,6 +13,7 @@ import os
 from datetime import datetime, timedelta
 import uuid
 from groq import Groq
+from bussines_bot import register_business_handlers
 
 # ---------- BOT SETUP ----------
 TOKEN = "8317148699:AAFZn4dZzKlBpivEKUYDbPcR4wL8iDgMMc8"
@@ -20,7 +21,7 @@ bot = telebot.TeleBot(TOKEN)
 bot.delete_webhook()
 
 # ---------- CONFIGURATION ----------
-GROQ_API_KEY = "no key"
+GROQ_API_KEY = "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"
 groq_client = Groq(api_key=GROQ_API_KEY)
 
 FREE_DAILY_QUOTA = 10
@@ -76,6 +77,32 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+def update_user_streak(user_id, display_name=None):
+    d = load_data()
+    users = d.setdefault("users", {})
+    rec = users.setdefault(str(user_id), {})
+
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    last_day = rec.get("streak_last_day")
+    cur = int(rec.get("streak_current", 0) or 0)
+
+    if last_day == today:
+        pass
+    elif last_day == yesterday:
+        cur = cur + 1 if cur > 0 else 1
+    else:
+        cur = 1
+
+    rec["streak_current"] = cur
+    rec["streak_last_day"] = today
+    rec["streak_best"] = max(int(rec.get("streak_best", 0) or 0), cur)
+    if display_name:
+        rec["display_name"] = str(display_name)[:64]
+    users[str(user_id)] = rec
+    save_data(d)
+    return cur
 
 def get_user(uid):
     data = load_data()
@@ -313,6 +340,13 @@ def inline_subscription_prompt(query):
     except Exception:
         pass
 
+# Register Telegram Business (Premium Chat Bots) handlers early.
+register_business_handlers(
+    bot,
+    required_channel=REQUIRED_CHANNEL,
+    is_user_subscribed=is_user_subscribed,
+)
+
 
 def safe_edit_message(call, text, reply_markup=None, parse_mode=None):
     """Edit message whether it's inline (inline_message_id) or normal (chat_id/message_id)."""
@@ -376,6 +410,7 @@ inline_slot_games = {}
 
 user_sys_settings = {}      # uid -> {msg, btn, title, gui}
 system_notify_wait = {}     # uid -> "field"
+telos_input_wait = {}       # uid -> {"action": "..."}
 millionaire_games = {}   # short_id -> {"question":..., "attempts":int}
 user_show_easter_egg = {}  # uid -> bool (для управления отображением пасхалки)
 
@@ -386,6 +421,8 @@ user_ai_mode = {}  # user_id -> mode
 rps_games = {}  # game_id -> {"uid": int}
 hide_games = {}
 hangman_games = {}  # gid -> {"word": str, "guessed": set(), "wrong": set(), "attempts": int}
+mafia_games = {}    # gid -> mafia game state
+games_tetris = {}   # gid -> {"w","h","board","piece","score","over"}
 
 # Словарь слов для Виселицы с подсказками
 HANGMAN_WORDS = {
@@ -494,6 +531,11 @@ QUIZ_QUESTIONS = [
     {"q": "Сколько планет в солнечной системе?", "a": "8"},
     {"q": "Какой язык программирования самый популярный?", "a": "пайтон"},
     {"q": "Столица России?", "a": "москва"},
+    {"q": "Кто написал 'Войну и мир'?", "a": "толстой"},
+    {"q": "Какой элемент имеет символ 'O'?", "a": "кислород"},
+    {"q": "Сколько континентов на Земле?", "a": "7"},
+    {"q": "Столица Украины?", "a": "киев"},
+    {"q": "Кто изобрёл телефон?", "a": "грейм белл"},
     {"q": "Какое самое глубокое место в мировом океане?", "a": "марианская впадина"},
     {"q": "Сколько строк в каноне Уголовного кодекса РФ?", "a": "360"},
     {"q": "Какой элемент имеет символ 'Au'?", "a": "золото"},
@@ -519,6 +561,7 @@ def main_menu_keyboard():
     kb.add("🏓 Пинг-понг", "🕵️‍♀️ Прятки")
     kb.add("🔤 Виселица", "🔤 Викторина")
     kb.add("⚡ Комбо-битва", "🔔 Ваше уведомление")
+    kb.add("🎭 Мафия", "🧱 Тетрис")
     kb.add("🚀 Поддержать автора")
     return kb
 
@@ -539,6 +582,172 @@ def telos_main_menu():
     kb.add(types.InlineKeyboardButton("⚙️ Настройки", callback_data="os_settings"))
     kb.add(types.InlineKeyboardButton("⏻ Выключить", callback_data="os_shutdown"))
     return kb
+
+def _telos_default_state():
+    return {
+        "booted": True,
+        "settings": {"os_name": "TELOS", "theme": "classic"},
+        "files": [{"name": "readme.txt", "content": "Добро пожаловать в TELOS! Эта система разработана для демонстрации возможностей бота. Вы можете создавать свои файлы и заметки, а также играть в мини-игры. Наслаждайтесь! :)"}],
+        "notes": [],
+        "terminal_history": [],
+        "mini_games": {"guess_target": None},
+        "created_at": int(time.time()),
+    }
+
+def _telos_get_state(user_id):
+    data = load_data()
+    users = data.setdefault("users", {})
+    user = users.setdefault(str(user_id), {})
+    state = user.get("telos")
+    if not isinstance(state, dict):
+        state = _telos_default_state()
+    state.setdefault("booted", True)
+    state.setdefault("settings", {})
+    state["settings"].setdefault("os_name", "TELOS")
+    state["settings"].setdefault("theme", "classic")
+    state.setdefault("files", [{"name": "readme.txt", "content": "Добро пожаловать в TELOS"}])
+    state.setdefault("notes", [])
+    state.setdefault("terminal_history", [])
+    state.setdefault("mini_games", {"guess_target": None})
+    state.setdefault("created_at", int(time.time()))
+    user["telos"] = state
+    users[str(user_id)] = user
+    save_data(data)
+    return state
+
+def _telos_save_state(user_id, state):
+    data = load_data()
+    users = data.setdefault("users", {})
+    user = users.setdefault(str(user_id), {})
+    user["telos"] = state
+    users[str(user_id)] = user
+    save_data(data)
+
+def _telos_home_text(user_id):
+    st = _telos_get_state(user_id)
+    return (
+        f"🖥 *{st['settings'].get('os_name', 'TELOS')} v1.0*\n"
+        f"👤 ID пользователя: `{user_id}`\n\n"
+        f"📁 Файлов: {len(st.get('files', []))}\n"
+        f"📝 Заметок: {len(st.get('notes', []))}\n"
+        f"🎨 Тема: {st['settings'].get('theme', 'classic')}\n\n"
+        "Выбирайте приложение:"
+    )
+
+def _telos_files_kb(st):
+    kb = types.InlineKeyboardMarkup()
+    for i, fobj in enumerate(st.get("files", [])[:6]):
+        kb.add(types.InlineKeyboardButton(f"📄 {str(fobj.get('name', 'file.txt'))[:24]}", callback_data=f"os_file_{i}"))
+    kb.row(
+        types.InlineKeyboardButton("➕ Добавить", callback_data="os_files_new"),
+        types.InlineKeyboardButton("🧹 Очистить", callback_data="os_files_clear"),
+    )
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
+    return kb
+
+def _telos_notes_kb(st):
+    kb = types.InlineKeyboardMarkup()
+    for i, note in enumerate(st.get("notes", [])[:6]):
+        kb.add(types.InlineKeyboardButton(f"🗒 {str(note)[:24]}", callback_data=f"os_note_{i}"))
+    kb.row(
+        types.InlineKeyboardButton("➕ Добавить", callback_data="os_notes_add"),
+        types.InlineKeyboardButton("🧹 Очистить", callback_data="os_notes_clear"),
+    )
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
+    return kb
+
+def _telos_terminal_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("❓ Помощь", callback_data="os_term_help"),
+        types.InlineKeyboardButton("🕒 Дата", callback_data="os_term_date"),
+        types.InlineKeyboardButton("⏱ Аптайм", callback_data="os_term_uptime"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("📁 Файлы", callback_data="os_term_ls"),
+        types.InlineKeyboardButton("🧹 Очистить", callback_data="os_term_clear"),
+        types.InlineKeyboardButton("⌨️ Ввести", callback_data="os_term_input"),
+    )
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
+    return kb
+
+def _telos_settings_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("✏️ Имя ОС", callback_data="os_set_name"),
+        types.InlineKeyboardButton("🎨 Тема", callback_data="os_set_theme"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("♻️ Сброс", callback_data="os_set_reset"),
+        types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"),
+    )
+    return kb
+
+def _telos_games_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("🪙 Монетка", callback_data="os_game_coin"),
+        types.InlineKeyboardButton("🎰 Слот", callback_data="os_game_slot"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("✂ КНБ", callback_data="os_game_rps"),
+        types.InlineKeyboardButton("🔢 Угадай число", callback_data="os_game_guess"),
+    )
+    kb.add(types.InlineKeyboardButton("🎲 Кубик", callback_data="os_game_dice"))
+    kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
+    return kb
+
+def _telos_rps_kb():
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("🪨", callback_data="os_game_rps_rock"),
+        types.InlineKeyboardButton("📄", callback_data="os_game_rps_paper"),
+        types.InlineKeyboardButton("✂️", callback_data="os_game_rps_scissors"),
+    )
+    kb.add(types.InlineKeyboardButton("⬅️ Назад к играм", callback_data="os_games"))
+    return kb
+
+def _telos_guess_kb():
+    kb = types.InlineKeyboardMarkup()
+    row = []
+    for i in range(1, 11):
+        row.append(types.InlineKeyboardButton(str(i), callback_data=f"os_game_guess_pick_{i}"))
+        if i % 5 == 0:
+            kb.row(*row)
+            row = []
+    kb.add(types.InlineKeyboardButton("⬅️ Назад к играм", callback_data="os_games"))
+    return kb
+
+def _telos_run_command(st, cmd):
+    cmd = (cmd or "").strip().lower()
+    alias = {
+        "помощь": "help",
+        "дата": "date",
+        "аптайм": "uptime",
+        "файлы": "ls",
+        "очистить": "clear",
+        "ктоя": "whoami",
+        "заметки": "notes",
+    }
+    cmd = alias.get(cmd, cmd)
+    if cmd == "help":
+        return "Команды: help/помощь, date/дата, uptime/аптайм, ls/файлы, notes/заметки, whoami/ктоя, clear/очистить"
+    if cmd == "date":
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if cmd == "uptime":
+        return f"{max(0, int(time.time()) - int(st.get('created_at', int(time.time()))))} сек."
+    if cmd == "ls":
+        files = [x.get("name", "file.txt") for x in st.get("files", [])]
+        return "\n".join(files) if files else "(пусто)"
+    if cmd == "notes":
+        notes = st.get("notes", [])
+        return "\n".join([f"{i+1}. {str(n)[:60]}" for i, n in enumerate(notes[:8])]) if notes else "(нет заметок)"
+    if cmd == "whoami":
+        return "пользователь"
+    if cmd == "clear":
+        st["terminal_history"] = []
+        return "История очищена."
+    return "Команда не найдена. Введите help."
 
 def eng_keyboard():
     kb = types.InlineKeyboardMarkup()
@@ -634,6 +843,134 @@ def ttt_build_keyboard(gid, board):
     kb.row(types.InlineKeyboardButton("🔁 Сыграть ещё", callback_data=f"ttt_restart_{gid}"))
     return kb
 
+def mafia_role_counts(n_players):
+    mafia_cnt = 1 if n_players < 7 else 2
+    doctor_cnt = 1 if n_players >= 5 else 0
+    detective_cnt = 1 if n_players >= 6 else 0
+    civ_cnt = n_players - mafia_cnt - doctor_cnt - detective_cnt
+    return mafia_cnt, doctor_cnt, detective_cnt, civ_cnt
+
+def mafia_assign_roles(players):
+    p = players[:]
+    random.shuffle(p)
+    mafia_cnt, doctor_cnt, detective_cnt, _ = mafia_role_counts(len(players))
+    roles = {}
+    idx = 0
+    for _ in range(mafia_cnt):
+        roles[p[idx]] = "mafia"
+        idx += 1
+    for _ in range(doctor_cnt):
+        roles[p[idx]] = "doctor"
+        idx += 1
+    for _ in range(detective_cnt):
+        roles[p[idx]] = "detective"
+        idx += 1
+    while idx < len(p):
+        roles[p[idx]] = "citizen"
+        idx += 1
+    return roles
+
+def mafia_alive_mafia_count(game):
+    return sum(1 for uid in game["alive"] if game["roles"].get(uid) == "mafia")
+
+def mafia_alive_citizen_count(game):
+    return sum(1 for uid in game["alive"] if game["roles"].get(uid) != "mafia")
+
+def mafia_check_winner(game):
+    m = mafia_alive_mafia_count(game)
+    c = mafia_alive_citizen_count(game)
+    if m <= 0:
+        return "citizens"
+    if m >= c:
+        return "mafia"
+    return None
+
+def mafia_render_text(game):
+    phase_title = {
+        "lobby": "🎭 Мафия - Лобби",
+        "night": "🌙 Мафия - Ночь",
+        "day": "☀️ Мафия - День",
+        "ended": "🏁 Мафия - Конец игры",
+    }.get(game.get("phase"), "🎭 Мафия")
+    text = f"{phase_title}\n\n"
+    text += f"Раунд: {game.get('round', 1)}\n"
+    text += f"Игроки: {len(game.get('players', []))} (живых: {len(game.get('alive', []))})\n\n"
+    text += "Живые игроки:\n"
+    for uid in game.get("alive", []):
+        text += f"- {game['names'].get(uid, 'Игрок')}\n"
+    if game.get("last_event"):
+        text += f"\n{game['last_event']}"
+    if game.get("phase") == "lobby":
+        text += "\n\nНужно 4-10 игроков. Создатель нажимает «Старт»."
+    elif game.get("phase") == "night":
+        text += "\n\nНочные роли делают действия. Нажмите «Моя роль», чтобы посмотреть роль."
+    elif game.get("phase") == "day":
+        text += "\n\nДневное голосование: выберите подозреваемого."
+    return text
+
+def mafia_build_lobby_kb(gid):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("➕ Присоединиться", callback_data=f"mafia_join_{gid}"))
+    kb.add(types.InlineKeyboardButton("▶️ Старт", callback_data=f"mafia_start_{gid}"))
+    kb.add(types.InlineKeyboardButton("🎭 Моя роль", callback_data=f"mafia_role_{gid}"))
+    return kb
+
+def mafia_build_night_kb(gid, game):
+    kb = types.InlineKeyboardMarkup()
+    for uid in game.get("alive", []):
+        if game["roles"].get(uid) != "mafia":
+            kb.add(types.InlineKeyboardButton(f"🔪 Убить: {game['names'].get(uid,'Игрок')}", callback_data=f"mafia_nkill_{gid}_{uid}"))
+    for uid in game.get("alive", []):
+        kb.add(types.InlineKeyboardButton(f"💊 Лечить: {game['names'].get(uid,'Игрок')}", callback_data=f"mafia_heal_{gid}_{uid}"))
+    for uid in game.get("alive", []):
+        kb.add(types.InlineKeyboardButton(f"🕵️ Проверить: {game['names'].get(uid,'Игрок')}", callback_data=f"mafia_check_{gid}_{uid}"))
+    kb.add(types.InlineKeyboardButton("🎭 Моя роль", callback_data=f"mafia_role_{gid}"))
+    return kb
+
+def mafia_build_day_kb(gid, game):
+    kb = types.InlineKeyboardMarkup()
+    for uid in game.get("alive", []):
+        kb.add(types.InlineKeyboardButton(f"🗳 Голос: {game['names'].get(uid,'Игрок')}", callback_data=f"mafia_vote_{gid}_{uid}"))
+    kb.add(types.InlineKeyboardButton("🎭 Моя роль", callback_data=f"mafia_role_{gid}"))
+    return kb
+
+def mafia_resolve_night(game):
+    target = game["night"].get("kill")
+    healed = game["night"].get("heal")
+    killed_uid = None
+    if target and target in game["alive"] and target != healed:
+        game["alive"].remove(target)
+        killed_uid = target
+        game["last_event"] = f"🌙 Ночью убит: {game['names'].get(target,'Игрок')}"
+    else:
+        game["last_event"] = "🌙 Ночью никто не погиб."
+    game["phase"] = "day"
+    game["votes"] = {}
+    game["night"] = {"kill": None, "heal": None, "check": None}
+    return killed_uid
+
+def mafia_resolve_day(game):
+    tally = {}
+    for _, target in game.get("votes", {}).items():
+        tally[target] = tally.get(target, 0) + 1
+    if not tally:
+        game["last_event"] = "☀️ Голосов нет. Никто не изгнан."
+    else:
+        max_votes = max(tally.values())
+        top = [uid for uid, v in tally.items() if v == max_votes]
+        if len(top) != 1:
+            game["last_event"] = "☀️ Ничья в голосовании. Никто не изгнан."
+        else:
+            out_uid = top[0]
+            if out_uid in game["alive"]:
+                game["alive"].remove(out_uid)
+            role = game["roles"].get(out_uid, "citizen")
+            role_ru = {"mafia": "мафия", "doctor": "доктор", "detective": "детектив", "citizen": "мирный"}[role]
+            game["last_event"] = f"☀️ Изгнан: {game['names'].get(out_uid,'Игрок')} ({role_ru})."
+    game["phase"] = "night"
+    game["round"] += 1
+    game["votes"] = {}
+    game["night"] = {"kill": None, "heal": None, "check": None}
 
 DEFAULT_LANG = "ru"
 
@@ -648,6 +985,7 @@ def t(user_id, key):
 @bot.message_handler(commands=["start"])
 def start(message):
     uid = message.from_user.id
+    update_user_streak(uid, message.from_user.first_name or message.from_user.username or str(uid))
 
     # Mark user as started for notifications
     user = get_user(uid)
@@ -666,6 +1004,44 @@ def start(message):
     # show localized main menu
     menu_kb = main_menu_keyboard()
     bot.send_message(message.chat.id, t(uid, "main_menu"), reply_markup=menu_kb)
+
+@bot.message_handler(commands=["topusers"])
+def topusers_cmd(message):
+    uid = message.from_user.id
+    update_user_streak(uid, message.from_user.first_name or message.from_user.username or str(uid))
+
+    d = load_data()
+    users = d.get("users", {})
+    today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+
+    rows = []
+    for uid_str, rec in users.items():
+        if not isinstance(rec, dict):
+            continue
+        streak = int(rec.get("streak_current", 0) or 0)
+        last_day = rec.get("streak_last_day")
+        if streak <= 0:
+            continue
+        # "Не сбивается серия": активность сегодня или вчера.
+        if last_day not in (today, yesterday):
+            continue
+        name = rec.get("display_name") or f"user_{uid_str}"
+        rows.append((streak, name, last_day))
+
+    if not rows:
+        bot.send_message(message.chat.id, "Пока нет активных серий. Начните использовать бота ежедневно.")
+        return
+
+    rows.sort(key=lambda x: (-x[0], x[1].lower()))
+    top = rows[:15]
+    text = "🏆 *Топ пользователей по серии*\n"
+    text += "_Серия считается по дням активности в боте._\n\n"
+    for i, (streak, name, last_day) in enumerate(top, 1):
+        status = "✅ сегодня" if last_day == today else "⌛ вчера"
+        text += f"{i}. {name} — {streak} дн. ({status})\n"
+
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 @bot.message_handler(commands=["settext"])
 def settext_cmd(message):
@@ -856,6 +1232,18 @@ def toggle_anim(message):
     else:
         bot.send_message(message.chat.id, "🐣 Пасхалка отключена. Она больше не будет отображатся в меню.\n\nЧтобы её включить, напишите /anim")
 
+@bot.message_handler(func=lambda m: m.text == "🧱 Тетрис")
+def tetris(message):
+    bot.send_message(message.chat.id, "Чтобы играть в тетрис — напиши <code>@minigamesisbot</code> в любом чате!", parse_mode="HTML")
+
+@bot.message_handler(func=lambda m: m.text == "🕵️‍♀️ Прятки")
+def hideandseek(message):
+    bot.send_message(message.chat.id, "Чтобы играть в прятки — напиши <code>@minigamesisbot</code> в любом чате!", parse_mode="HTML")
+
+@bot.message_handler(func=lambda m: m.text == "🎭 Мафия")
+def mafia(message):
+    bot.send_message(message.chat.id, "Чтобы играть в мафию — напиши <code>@minigamesisbot</code> в любом чате!", parse_mode="HTML")
+
 @bot.message_handler(func=lambda m: m.text == "✖️ Крестики-нолики")
 def ttt(message):
     bot.send_message(message.chat.id, "Чтобы играть в крестики-нолики — напиши <code>@minigamesisbot</code> в любом чате!", parse_mode="HTML")
@@ -878,11 +1266,15 @@ def orel(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔔 Ваше уведомление")
 def notification(message):
-    bot.send_message(message.chat.id, "Чтобы настроить системное уведомление - напиши <code>/settext</code>", parse_mode="HTML")
+    bot.send_message(message.chat.id, "Чтобы настроить системное уведомление - напиши <code>/messagenot</code>", parse_mode="HTML")
 
 @bot.message_handler(func=lambda m: m.text == "🖥 TELOS v1.0")
 def telos(message):
-    bot.send_message(message.chat.id, "Чтобы запустить мини ос - напиши <code>@minigamesisbot</code> в любом чате!", parse_mode="HTML")
+    uid = message.from_user.id
+    st = _telos_get_state(uid)
+    st["booted"] = True
+    _telos_save_state(uid, st)
+    bot.send_message(message.chat.id, _telos_home_text(uid), parse_mode="Markdown", reply_markup=telos_main_menu())
 
 @bot.message_handler(func=lambda m: m.text == "🔢 Угадай число")
 def ugadayka(message):
@@ -914,7 +1306,25 @@ def pingpong(message):
 
 @bot.message_handler(commands=["connect"])
 def connect(message):
-    bot.send_message(message.chat.id, "Внимание‼\n⚠ Данная функция сейчас в разработке.\n⚠ Для подключения бота требуется подписка Telegram Premium! Вы можете продолжать пользоватся ботом бесплатно через inline режим.\n\n<b>Как подключить бота?</b>\nИнструкция:\n1. Скопируйте имя <code>@minigamesisbot</code> нажав на него\n2. Перейдите в Настройки -> Telegram для бизнеса -> Чат-боты\n3. Вставьте скопированное имя и примените изменения\n‼️ Обратите внимание что оригинал бота будет первым в списке\n", parse_mode="HTML")
+    bot.send_message(
+        message.chat.id,
+        "⚙️ <b>Подключение через Telegram Business</b>\n\n"
+        "ВНИМАНИЕ! Сейчас в разработке!\n"
+        "AI-функции в business-режиме отключены.\n\n"
+        "<b>Доступные игры (этап 1):</b>\n"
+        "• тетрис\n"
+        "• 2048\n"
+        "• кнб (камень-ножницы-бумага)\n"
+        "• угадай число\n"
+        "• казино\n"
+        "• орёл или решка\n\n"
+        "<b>Как подключить:</b>\n"
+        "1. Скопируйте имя <code>@minigamesisbot</code>\n"
+        "2. Откройте: Настройки → Telegram для бизнеса → Чат-боты\n"
+        "3. Добавьте бота и примените настройки\n\n"
+        "После подключения просто отправьте в бизнес-чат название игры.",
+        parse_mode="HTML",
+    )
 
 @bot.message_handler(func=lambda m: m.text == "🚀 Поддержать автора")
 def support(message):
@@ -943,6 +1353,7 @@ def play(message):
 @bot.inline_handler(lambda q: q.query.strip() != "")
 def ai_inline(query):
     uid = query.from_user.id
+    update_user_streak(uid, query.from_user.first_name or query.from_user.username or str(uid))
     # require subscription for inline AI
     if REQUIRED_CHANNEL and not is_user_subscribed(uid):
         return inline_subscription_prompt(query)
@@ -992,6 +1403,7 @@ def ai_inline(query):
 def inline_handler(query):
     try:
         user = query.from_user
+        update_user_streak(user.id, user.first_name or user.username or str(user.id))
         # require subscription for inline features
         if REQUIRED_CHANNEL and not is_user_subscribed(user.id):
             return inline_subscription_prompt(query)
@@ -1008,7 +1420,7 @@ def inline_handler(query):
         ttext = f"🎮 Крестики-нолики\n❌ {user_name}\n⭕ — (ожидается)\nНажмите «Присоединиться ⭕», чтобы начать."
         results.append(types.InlineQueryResultArticle(
             id=f"ttt_{short_id()}", title="❌ Крестики-нолики",
-            description="Играть с другом",
+            description="Крестики-нолики на 2 игрока",
             input_message_content=types.InputTextMessageContent(message_text=ttext, parse_mode="HTML"),
             reply_markup=join_markup))
 
@@ -1022,7 +1434,7 @@ def inline_handler(query):
         results.append(types.InlineQueryResultArticle(
             id=f"millionaire_{gid}",
             title="💰 Миллионер",
-            description="Попробуй ответить правильно",
+            description="Ответьте на вопрос и проверьте свои знания",
             input_message_content=types.InputTextMessageContent(f"💰 {qdata['question']}\nОсталось попыток: 3"),
             reply_markup=markup_m
         ))
@@ -1034,7 +1446,7 @@ def inline_handler(query):
             results.append(types.InlineQueryResultArticle(
                 id=f"egg_{short_id()}",
                 title="🐣 Пасхалка",
-                description="Прикольная анимация",
+                description="Анимация",
                 input_message_content=types.InputTextMessageContent("🐣 Нажмите кнопку ниже"),
                 reply_markup=egg_markup
             ))
@@ -1045,7 +1457,7 @@ def inline_handler(query):
         results.append(types.InlineQueryResultArticle(
             id=f"coin_{short_id()}",
             title="🪙 Орёл или решка",
-            description="Подбросьте монетку",
+            description="Рандомный выбор между орлом и решкой",
             input_message_content=types.InputTextMessageContent("🪙 Орёл или решка?"),
             reply_markup=coin_m
         ))
@@ -1053,9 +1465,9 @@ def inline_handler(query):
         # TELOS OS
         results.append(types.InlineQueryResultArticle(
             id=f"os_{short_id()}",
-            title="🖥 TELOS v1.0 (macOS)",
-            description="Мини система в телеграме",
-            input_message_content=types.InputTextMessageContent("🖥 *TELOS v1.0*\nВыбирайте приложение:", parse_mode="Markdown"),
+            title="🖥 TELOS v1.1 (macOS)",
+            description="Мини ОС в телеграме. Версия 1.1 с новыми функциями!",
+            input_message_content=types.InputTextMessageContent("🖥 *TELOS v1.1*\nВыбирайте приложение:", parse_mode="Markdown"),
             reply_markup=telos_main_menu()
         ))
 
@@ -1089,8 +1501,8 @@ def inline_handler(query):
                 markup_sys.add(types.InlineKeyboardButton(btn_text, callback_data=f"sysopen_{u_uid}_{sys_preview_id}"))
                 results.append(types.InlineQueryResultArticle(
                     id=f"sys_{sys_preview_id}",
-                    title="Системное уведомление",
-                    description="Ваше сохранённое уведомление",
+                    title="🔔 Системное уведомление",
+                    description="Ваше уведомление",
                     input_message_content=types.InputTextMessageContent(
                         f"*{data.get('title','Системное уведомление')}*\n{data.get('msg','')}",
                         parse_mode="Markdown"
@@ -1104,7 +1516,7 @@ def inline_handler(query):
         results.append(types.InlineQueryResultArticle(
             id=f"slot_{short_id()}",
             title="🎰 Казино",
-            description="Испытайте свое везение!",
+            description="Слот машина",
             input_message_content=types.InputTextMessageContent("🎰 Нажмите ниже для запуска!"),
             reply_markup=slot_m
         ))
@@ -1116,6 +1528,20 @@ def inline_handler(query):
             description="Инлайн-змейка",
             input_message_content=types.InputTextMessageContent("🐍 Используйте кнопки для управления змейкой. "),
             reply_markup=snake_controls()
+        ))
+
+        # Tetris
+        tgid = short_id()
+        results.append(types.InlineQueryResultArticle(
+            id=f"tetris_{tgid}",
+            title="🧱 Тетрис",
+            description="Обычный тетрис",
+            input_message_content=types.InputTextMessageContent(
+                "🧱 Тетрис\nНажмите кнопку «Старт», чтобы начать."
+            ),
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("▶️ Старт", callback_data="tetris_new")
+            )
         ))
 
         # Flappy preview
@@ -1150,7 +1576,7 @@ def inline_handler(query):
         results.append(types.InlineQueryResultArticle(
             id=f"pong_{pgid}",
             title="🏓 Пинг-понг (2 игрока)",
-            description="К сожелению, сейчас не работает",
+            description="Сейчас в разработке",
             input_message_content=types.InputTextMessageContent("🏓 Пинг-понг\nНажмите 'Присоединиться' чтобы игра началась."),
             reply_markup=pm
         ))
@@ -1272,6 +1698,31 @@ def inline_handler(query):
                 parse_mode="Markdown"
             ),
             reply_markup=ckb
+        ))
+
+        # Мафия
+        mgid = short_id()
+        host_name = query.from_user.first_name or "Игрок 1"
+        mafia_games[mgid] = {
+            "owner": starter_id,
+            "players": [starter_id],
+            "alive": [starter_id],
+            "names": {starter_id: host_name},
+            "roles": {},
+            "phase": "lobby",
+            "round": 1,
+            "night": {"kill": None, "heal": None, "check": None},
+            "votes": {},
+            "last_event": "Лобби создано."
+        }
+        results.append(types.InlineQueryResultArticle(
+            id=f"mafia_{mgid}",
+            title="🎭 Мафия",
+            description="Игра на роли: ночь и голосование днем",
+            input_message_content=types.InputTextMessageContent(
+                "🎭 Мафия\n\nСоздано лобби. Нажмите «Присоединиться», затем «Старт»."
+            ),
+            reply_markup=mafia_build_lobby_kb(mgid)
         ))
 
         bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
@@ -2042,9 +2493,206 @@ def move_board(board, direction):
                 new[y][x] = moved_col[y]
     return new, moved
 
+# ------------------- TETRIS -------------------
+TETRIS_SHAPES = [
+    [[1, 1, 1, 1]],               # I
+    [[1, 1], [1, 1]],             # O
+    [[1, 1, 1], [0, 1, 0]],       # T
+    [[1, 1, 1], [1, 0, 0]],       # L
+    [[1, 1, 1], [0, 0, 1]],       # J
+    [[1, 1, 0], [0, 1, 1]],       # S
+    [[0, 1, 1], [1, 1, 0]],       # Z
+    [[1, 1, 1]],                  # mini I
+    [[1], [1], [1]],              # mini I vertical
+    [[1, 1], [1, 0]],             # small L
+    [[1, 1], [0, 1]],             # small J
+    [[1, 1, 1], [1, 0, 1]],       # U
+    [[0, 1, 0], [1, 1, 1], [0, 1, 0]],  # plus
+]
+TETRIS_COLORS = ["🟥", "🟧", "🟨", "🟩", "🟦", "🟪", "🟫", "⬜"]
+
+def tetris_new_state():
+    st = {
+        "w": 10,
+        "h": 14,
+        "board": [[0]*10 for _ in range(14)],
+        "piece": None,
+        "score": 0,
+        "over": False
+    }
+    tetris_spawn_piece(st)
+    return st
+
+def tetris_can_place(state, px, py, shape):
+    for sy, row in enumerate(shape):
+        for sx, v in enumerate(row):
+            if not v:
+                continue
+            x = px + sx
+            y = py + sy
+            if x < 0 or x >= state["w"] or y < 0 or y >= state["h"]:
+                return False
+            if state["board"][y][x]:
+                return False
+    return True
+
+def tetris_spawn_piece(state):
+    shape = random.choice(TETRIS_SHAPES)
+    color = random.randint(1, len(TETRIS_COLORS))
+    px = (state["w"] - len(shape[0])) // 2
+    py = 0
+    if not tetris_can_place(state, px, py, shape):
+        state["over"] = True
+        return False
+    state["piece"] = {"x": px, "y": py, "shape": shape, "color": color}
+    return True
+
+def tetris_lock_piece(state):
+    p = state.get("piece")
+    if not p:
+        return
+    for sy, row in enumerate(p["shape"]):
+        for sx, v in enumerate(row):
+            if v:
+                state["board"][p["y"] + sy][p["x"] + sx] = p.get("color", 1)
+    state["piece"] = None
+
+def tetris_clear_lines(state):
+    new_board = []
+    cleared = 0
+    for row in state["board"]:
+        if all(c == 1 for c in row):
+            cleared += 1
+        else:
+            new_board.append(row)
+    while len(new_board) < state["h"]:
+        new_board.insert(0, [0]*state["w"])
+    state["board"] = new_board
+    if cleared:
+        state["score"] += cleared * 100
+    return cleared
+
+def tetris_move(state, dx):
+    if state.get("over") or not state.get("piece"):
+        return False
+    p = state["piece"]
+    nx = p["x"] + dx
+    if tetris_can_place(state, nx, p["y"], p["shape"]):
+        p["x"] = nx
+        return True
+    return False
+
+def tetris_drop(state):
+    if state.get("over") or not state.get("piece"):
+        return False
+    p = state["piece"]
+    while tetris_can_place(state, p["x"], p["y"] + 1, p["shape"]):
+        p["y"] += 1
+    tetris_lock_piece(state)
+    tetris_clear_lines(state)
+    tetris_spawn_piece(state)
+    return True
+
+def tetris_render(state):
+    w, h = state["w"], state["h"]
+    view = [[state["board"][y][x] for x in range(w)] for y in range(h)]
+    active = [[False]*w for _ in range(h)]
+    p = state.get("piece")
+    if p:
+        for sy, row in enumerate(p["shape"]):
+            for sx, v in enumerate(row):
+                if v:
+                    y = p["y"] + sy
+                    x = p["x"] + sx
+                    if 0 <= y < h and 0 <= x < w:
+                        view[y][x] = p.get("color", 1)
+                        active[y][x] = True
+    lines = []
+    for y in range(h):
+        row = []
+        for x in range(w):
+            if view[y][x] == 0:
+                row.append("⬛")
+                continue
+            idx = max(1, min(view[y][x], len(TETRIS_COLORS))) - 1
+            cell = TETRIS_COLORS[idx]
+            # Active falling piece is highlighted for better readability.
+            if active[y][x]:
+                row.append(cell)
+            else:
+                row.append(cell)
+        lines.append("".join(row))
+    text = f"🧱 Тетрис\nОчки: {state['score']}\n\n" + "\n".join(lines)
+    if state.get("over"):
+        text += "\n\n💀 Игра окончена"
+    return text
+
+def tetris_controls(gid, over=False):
+    kb = types.InlineKeyboardMarkup()
+    kb.row(
+        types.InlineKeyboardButton("⬅️", callback_data=f"tetris_{gid}_left"),
+        types.InlineKeyboardButton("➡️", callback_data=f"tetris_{gid}_right")
+    )
+    kb.row(types.InlineKeyboardButton("⬇️ Отпустить", callback_data=f"tetris_{gid}_drop"))
+    if over:
+        kb.row(types.InlineKeyboardButton("🔁 Новая игра", callback_data="tetris_new"))
+    return kb
+
+def tetris_retry_after_seconds(err):
+    msg = str(err).lower()
+    marker = "retry after "
+    if marker not in msg:
+        return None
+    tail = msg.split(marker, 1)[1]
+    num = []
+    for ch in tail:
+        if ch.isdigit():
+            num.append(ch)
+        else:
+            break
+    if not num:
+        return None
+    try:
+        return int("".join(num))
+    except Exception:
+        return None
+
+def tetris_safe_edit(call, gid, st, force=False):
+    now = time.time()
+    next_edit_at = st.get("next_edit_at", 0.0)
+    if (not force) and now < next_edit_at:
+        return False
+    try:
+        text = tetris_render(st)
+        kb = tetris_controls(gid, over=st.get("over", False))
+        if getattr(call, "inline_message_id", None):
+            bot.edit_message_text(
+                text,
+                inline_message_id=call.inline_message_id,
+                reply_markup=kb
+            )
+        elif getattr(call, "message", None):
+            bot.edit_message_text(
+                text,
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=kb
+            )
+        else:
+            return False
+        st["next_edit_at"] = time.time() + 0.12
+        return True
+    except Exception as e:
+        wait = tetris_retry_after_seconds(e)
+        if wait:
+            st["next_edit_at"] = time.time() + wait + 0.2
+            return False
+        raise
+
 @bot.inline_handler(lambda q: q.query.lower() == "2048" or q.query.strip() == "2048")
 def inline_2048(query):
     # require subscription
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     board = [[0]*4 for _ in range(4)]
@@ -2060,6 +2708,23 @@ def inline_2048(query):
         description="Нажми стрелку, чтобы начать",
         input_message_content=types.InputTextMessageContent("🔢 2048\nНажми кнопку, чтобы начать."),
         reply_markup=markup
+    )]
+    bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
+
+@bot.inline_handler(lambda q: q.query.lower() == "tetris" or q.query.lower() == "тетрис")
+def inline_tetris(query):
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
+    if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
+        return inline_subscription_prompt(query)
+    gid = short_id()
+    results = [types.InlineQueryResultArticle(
+        id=f"tetris_preview_{gid}",
+        title="🧱 Тетрис",
+        description="Кнопки влево/вправо/отпустить",
+        input_message_content=types.InputTextMessageContent("🧱 Тетрис\nНажмите «Старт»."),
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("▶️ Старт", callback_data="tetris_new")
+        )
     )]
     bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
 
@@ -2132,6 +2797,75 @@ def sys_set_field(call):
     system_notify_wait[uid] = field
     bot.answer_callback_query(call.id)
     bot.send_message(uid, f"✏ Введите новое значение для поля: {field}")
+
+@bot.callback_query_handler(func=lambda c: c.data == "tetris_new" or c.data.startswith("tetris_"))
+def tetris_callback(call):
+    try:
+        data = call.data
+        if data == "tetris_new":
+            gid = short_id()
+            games_tetris[gid] = tetris_new_state()
+            st = games_tetris[gid]
+            ok = tetris_safe_edit(call, gid, st, force=True)
+            if not ok:
+                bot.answer_callback_query(call.id, "Подождите 1-2 секунды и нажмите Старт снова", show_alert=True)
+                return
+            bot.answer_callback_query(call.id, "Тетрис запущен")
+            return
+
+        parts = data.split("_", 2)  # tetris_<gid>_<action>
+        if len(parts) < 3:
+            bot.answer_callback_query(call.id, "Неверные данные")
+            return
+        gid = parts[1]
+        action = parts[2]
+        st = games_tetris.get(gid)
+        if not st:
+            bot.answer_callback_query(call.id, "Игра не найдена")
+            return
+
+        if st.get("over"):
+            tetris_safe_edit(call, gid, st, force=True)
+            bot.answer_callback_query(call.id, "Игра завершена")
+            return
+
+        if action == "left":
+            tetris_move(st, -1)
+            bot.answer_callback_query(call.id)
+        elif action == "right":
+            tetris_move(st, 1)
+            bot.answer_callback_query(call.id)
+        elif action == "drop":
+            bot.answer_callback_query(call.id, "Блок отпущен")
+            # Fast smooth drop animation (instead of instant teleport).
+            if st.get("piece") and not st.get("over"):
+                p = st["piece"]
+                start_y = p["y"]
+                end_y = start_y
+                while tetris_can_place(st, p["x"], end_y + 1, p["shape"]):
+                    end_y += 1
+                dist = end_y - start_y
+                if dist > 0:
+                    frames = min(4, dist)
+                    last_y = p["y"]
+                    for i in range(1, frames + 1):
+                        ny = start_y + (dist * i) // frames
+                        if ny == last_y:
+                            continue
+                        p["y"] = ny
+                        last_y = ny
+                        tetris_safe_edit(call, gid, st)
+                        time.sleep(0.07)
+                tetris_lock_piece(st)
+                tetris_clear_lines(st)
+                tetris_spawn_piece(st)
+        else:
+            bot.answer_callback_query(call.id)
+
+        tetris_safe_edit(call, gid, st, force=True)
+    except Exception as e:
+        print("TETRIS ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка Тетриса")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("g2048_"))
@@ -2210,6 +2944,7 @@ def render_pong_state(state):
 @bot.inline_handler(lambda q: q.query.lower() == "pong" or q.query.strip() == "pong" or q.query.lower() == "ping-pong")
 def inline_pong(query):
     # require subscription
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     gid = short_id()
@@ -2532,6 +3267,7 @@ def render_hangman_keyboard(gid, game):
 
 @bot.inline_handler(lambda q: q.query.lower() == "hangman")
 def inline_hangman(query):
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     
@@ -2680,6 +3416,7 @@ def render_minesweeper_board(board, revealed):
 # ------------------- СЛОВЕСНАЯ ДУЭЛЬ (Игра в слова) -------------------
 @bot.inline_handler(lambda q: q.query.lower() == "слова" or q.query.lower() == "word_duel")
 def inline_word_duel(query):
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     
@@ -2714,6 +3451,7 @@ def inline_word_duel(query):
 # ------------------- ВИКТОРИНА "КТО БЫСТРЕЕ" -------------------
 @bot.inline_handler(lambda q: q.query.lower() == "викторина" or q.query.lower() == "quiz")
 def inline_quiz_game(query):
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     
@@ -2755,6 +3493,7 @@ def inline_quiz_game(query):
 # ------------------- КОМБО-БИТВА -------------------
 @bot.inline_handler(lambda q: q.query.lower() == "комбо" or q.query.lower() == "combo")
 def inline_combo_battle(query):
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     
@@ -2791,7 +3530,183 @@ def inline_combo_battle(query):
     
     bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
 
+@bot.inline_handler(lambda q: q.query.lower() == "мафия" or q.query.lower() == "mafia")
+def inline_mafia_game(query):
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
+    if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
+        return inline_subscription_prompt(query)
+
+    gid = short_id()
+    host_id = query.from_user.id
+    host_name = query.from_user.first_name or "Игрок 1"
+    mafia_games[gid] = {
+        "owner": host_id,
+        "players": [host_id],
+        "alive": [host_id],
+        "names": {host_id: host_name},
+        "roles": {},
+        "phase": "lobby",
+        "round": 1,
+        "night": {"kill": None, "heal": None, "check": None},
+        "votes": {},
+        "last_event": "Лобби создано."
+    }
+
+    results = [types.InlineQueryResultArticle(
+        id=f"mafia_{gid}",
+        title="🎭 Мафия",
+        description="Нужно 4-10 игроков",
+        input_message_content=types.InputTextMessageContent(
+            "🎭 Мафия\n\nСоздано лобби. Нажмите «Присоединиться», затем «Старт»."
+        ),
+        reply_markup=mafia_build_lobby_kb(gid)
+    )]
+    bot.answer_inline_query(query.id, results, cache_time=1, is_personal=True)
+
 # ------------------- CALLBACK HANDLERS ДЛЯ НОВЫХ ИГР -------------------
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("mafia_"))
+def mafia_callback(call):
+    try:
+        parts = call.data.split("_")
+        action = parts[1] if len(parts) > 1 else ""
+        gid = parts[2] if len(parts) > 2 else ""
+        game = mafia_games.get(gid)
+        if not game:
+            bot.answer_callback_query(call.id, "Игра не найдена")
+            return
+
+        uid = call.from_user.id
+        uname = call.from_user.first_name or "Игрок"
+
+        if action == "join":
+            if game.get("phase") != "lobby":
+                bot.answer_callback_query(call.id, "Игра уже началась", show_alert=True)
+                return
+            if uid not in game["players"]:
+                if len(game["players"]) >= 10:
+                    bot.answer_callback_query(call.id, "Лобби заполнено (макс. 10)", show_alert=True)
+                    return
+                game["players"].append(uid)
+                game["alive"].append(uid)
+            game["names"][uid] = uname
+            game["last_event"] = f"Присоединился: {uname}"
+            safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_lobby_kb(gid))
+            bot.answer_callback_query(call.id, "Вы в игре")
+            return
+
+        if action == "start":
+            if uid != game.get("owner"):
+                bot.answer_callback_query(call.id, "Только создатель может начать", show_alert=True)
+                return
+            if game.get("phase") != "lobby":
+                bot.answer_callback_query(call.id, "Игра уже идет")
+                return
+            n = len(game.get("players", []))
+            if n < 4:
+                bot.answer_callback_query(call.id, "Нужно минимум 4 игрока", show_alert=True)
+                return
+            game["roles"] = mafia_assign_roles(game["players"])
+            game["phase"] = "night"
+            game["last_event"] = "Игра началась. Наступила ночь."
+            safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_night_kb(gid))
+            bot.answer_callback_query(call.id, "Старт")
+            return
+
+        if action == "role":
+            role = game.get("roles", {}).get(uid)
+            if not role:
+                bot.answer_callback_query(call.id, "Роль пока не назначена", show_alert=True)
+                return
+            ru = {"mafia": "Мафия", "doctor": "Доктор", "detective": "Детектив", "citizen": "Мирный"}
+            bot.answer_callback_query(call.id, f"Ваша роль: {ru.get(role, role)}", show_alert=True)
+            return
+
+        if uid not in game.get("alive", []):
+            bot.answer_callback_query(call.id, "Вы выбыли из игры", show_alert=True)
+            return
+
+        if action in ("nkill", "heal", "check"):
+            if game.get("phase") != "night":
+                bot.answer_callback_query(call.id, "Сейчас не ночь", show_alert=True)
+                return
+            if len(parts) < 4:
+                bot.answer_callback_query(call.id, "Неверные данные")
+                return
+            target = int(parts[3])
+            if target not in game.get("alive", []):
+                bot.answer_callback_query(call.id, "Цель недоступна", show_alert=True)
+                return
+            role = game["roles"].get(uid)
+            if action == "nkill":
+                if role != "mafia":
+                    bot.answer_callback_query(call.id, "Это действие доступно только мафии", show_alert=True)
+                    return
+                if game["roles"].get(target) == "mafia":
+                    bot.answer_callback_query(call.id, "Нельзя выбрать мафию", show_alert=True)
+                    return
+                game["night"]["kill"] = target
+                bot.answer_callback_query(call.id, f"Цель выбрана: {game['names'].get(target,'Игрок')}")
+            elif action == "heal":
+                if role != "doctor":
+                    bot.answer_callback_query(call.id, "Это действие доступно только доктору", show_alert=True)
+                    return
+                game["night"]["heal"] = target
+                bot.answer_callback_query(call.id, f"Лечение: {game['names'].get(target,'Игрок')}")
+            else:
+                if role != "detective":
+                    bot.answer_callback_query(call.id, "Это действие доступно только детективу", show_alert=True)
+                    return
+                game["night"]["check"] = target
+                is_mafia = game["roles"].get(target) == "mafia"
+                res = "мафия" if is_mafia else "не мафия"
+                bot.answer_callback_query(call.id, f"{game['names'].get(target,'Игрок')} — {res}", show_alert=True)
+
+            need_kill = any(game["roles"].get(x) == "mafia" for x in game["alive"])
+            need_heal = any(game["roles"].get(x) == "doctor" for x in game["alive"])
+            need_check = any(game["roles"].get(x) == "detective" for x in game["alive"])
+            ready = (not need_kill or game["night"].get("kill") is not None) and \
+                    (not need_heal or game["night"].get("heal") is not None) and \
+                    (not need_check or game["night"].get("check") is not None)
+            if ready:
+                mafia_resolve_night(game)
+                winner = mafia_check_winner(game)
+                if winner:
+                    game["phase"] = "ended"
+                    game["last_event"] += "\n🏁 Победили " + ("мирные" if winner == "citizens" else "мафия")
+                    safe_edit_message(call, mafia_render_text(game))
+                else:
+                    safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_day_kb(gid))
+            return
+
+        if action == "vote":
+            if game.get("phase") != "day":
+                bot.answer_callback_query(call.id, "Сейчас не день", show_alert=True)
+                return
+            if len(parts) < 4:
+                bot.answer_callback_query(call.id, "Неверные данные")
+                return
+            target = int(parts[3])
+            if target not in game.get("alive", []):
+                bot.answer_callback_query(call.id, "Цель недоступна", show_alert=True)
+                return
+            game["votes"][uid] = target
+            bot.answer_callback_query(call.id, f"Голос принят: {game['names'].get(target,'Игрок')}")
+            if len(game["votes"]) >= len(game.get("alive", [])):
+                mafia_resolve_day(game)
+                winner = mafia_check_winner(game)
+                if winner:
+                    game["phase"] = "ended"
+                    game["last_event"] += "\n🏁 Победили " + ("мирные" if winner == "citizens" else "мафия")
+                    safe_edit_message(call, mafia_render_text(game))
+                else:
+                    safe_edit_message(call, mafia_render_text(game), reply_markup=mafia_build_night_kb(gid))
+            return
+
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print("MAFIA CALLBACK ERROR:", e)
+        bot.answer_callback_query(call.id, "Ошибка Мафии")
 
 # Словесная дуэль - присоединение
 @bot.callback_query_handler(func=lambda c: c.data.startswith("wordgame_join_"))
@@ -2899,7 +3814,8 @@ def quizgame_join(call):
             game["answered"] = game.get("answered", {})
             game["correct"] = game.get("correct", {})
             game["max_players"] = 4
-            game["started"] = len(players) >= 2
+            # Do not auto-start on 2 players; only owner starts via button.
+            game["started"] = game.get("started", False)
             game["locked"] = False
             game["owner"] = players[0] if players else None
 
@@ -2913,7 +3829,7 @@ def quizgame_join(call):
                 p1_name = names.get(players[0], "Игрок 1")
                 kb = types.InlineKeyboardMarkup()
                 kb.add(types.InlineKeyboardButton("Присоединиться", callback_data=f"quizgame_join_{gid}"))
-                if owner == call.from_user.id:
+                if len(players) >= 2:
                     kb.add(types.InlineKeyboardButton("▶️ Старт", callback_data=f"quizgame_start_{gid}"))
                 text = f"🧠 *Викторина*\n\n"
                 text += f"❓ {game['question']}\n\n"
@@ -2939,8 +3855,9 @@ def quizgame_join(call):
         game["answered"].setdefault(uid, False)
         game["correct"].setdefault(uid, False)
 
-        if len(players) >= 2:
-            game["started"] = True
+        # Keep lobby state until owner explicitly presses Start.
+        if "started" not in game:
+            game["started"] = False
 
         text = f"🧠 *Викторина*\n\n"
         text += f"❓ {game['question']}\n\n"
@@ -2968,7 +3885,7 @@ def quizgame_join(call):
                    types.InlineKeyboardButton("✅ Готово", callback_data=f"quiz_{gid}_submit"))
         else:
             kb.add(types.InlineKeyboardButton("Присоединиться", callback_data=f"quizgame_join_{gid}"))
-            if owner == call.from_user.id:
+            if len(players) >= 2:
                 kb.add(types.InlineKeyboardButton("▶️ Старт", callback_data=f"quizgame_start_{gid}"))
 
         safe_edit_message(call, text, reply_markup=kb, parse_mode="Markdown")
@@ -3059,7 +3976,8 @@ def quiz_input(call):
             game["answered"] = game.get("answered", {})
             game["correct"] = game.get("correct", {})
             game["max_players"] = 4
-            game["started"] = len(players) >= 2
+            # Do not auto-start migrated games.
+            game["started"] = game.get("started", False)
             game["locked"] = False
             game["owner"] = players[0] if players else None
 
@@ -3374,6 +4292,7 @@ def combo_choice(call):
 @bot.inline_handler(lambda q: q.query.lower() == "minesweeper")
 def inline_minesweeper(query):
     # require subscription
+    update_user_streak(query.from_user.id, query.from_user.first_name or query.from_user.username or str(query.from_user.id))
     if REQUIRED_CHANNEL and not is_user_subscribed(query.from_user.id):
         return inline_subscription_prompt(query)
     size = 5
@@ -3437,27 +4356,224 @@ def minesweeper_callback(call):
 def telos_callbacks(call):
     try:
         data = call.data
+        uid = call.from_user.id
+        st = _telos_get_state(uid)
+
         if data == "os_back":
-            safe_edit_message(call, "🖥️ *TELOS v1.0*\nВыбирайте приложение:", reply_markup=telos_main_menu(), parse_mode="Markdown")
+            safe_edit_message(call, _telos_home_text(uid), reply_markup=telos_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="os_back"))
+        if data == "os_boot":
+            st["booted"] = True
+            _telos_save_state(uid, st)
+            safe_edit_message(call, _telos_home_text(uid), reply_markup=telos_main_menu(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if not st.get("booted", True):
+            boot_kb = types.InlineKeyboardMarkup()
+            boot_kb.add(types.InlineKeyboardButton("▶️ Запустить", callback_data="os_boot"))
+            safe_edit_message(call, "⏻ *TELOS выключен*\nНажмите Запустить.", reply_markup=boot_kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
 
         if data == "os_files":
-            safe_edit_message(call, "📁 *Файлы*\nФункция в разработке.", reply_markup=kb, parse_mode="Markdown")
-        elif data == "os_notes":
-            safe_edit_message(call, "📝 *Заметки*\nФункция в разработке.", reply_markup=kb, parse_mode="Markdown")
-        elif data == "os_games":
-            safe_edit_message(call, "🎮 *Игры*\nФункция в разработке.", reply_markup=kb, parse_mode="Markdown")
-        elif data == "os_terminal":
-            safe_edit_message(call, "💬 *Терминал*\nФункция в разработке.", reply_markup=kb, parse_mode="Markdown")
-        elif data == "os_settings":
-            safe_edit_message(call, "⚙️ *Настройки*\nФункция в разработке.", reply_markup=kb, parse_mode="Markdown")
-        elif data == "os_shutdown":
-            safe_edit_message(call, "⏻ *Выключение*\nСессия завершена.", reply_markup=kb, parse_mode="Markdown")
-        else:
+            files = st.get("files", [])
+            body = "\n".join([f"{i+1}. `{x.get('name', 'file.txt')}`" for i, x in enumerate(files[:10])]) if files else "(пусто)"
+            safe_edit_message(call, "*Файлы*\n\n" + body, reply_markup=_telos_files_kb(st), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_files_new":
+            telos_input_wait[uid] = {"action": "new_file"}
+            bot.answer_callback_query(call.id)
+            bot.send_message(uid, "Отправьте файл в формате: `имя.txt | содержимое`", parse_mode="Markdown")
+            return
+
+        if data == "os_files_clear":
+            st["files"] = []
+            _telos_save_state(uid, st)
+            safe_edit_message(call, "*Файлы*\n\n(пусто)", reply_markup=_telos_files_kb(st), parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Файлы очищены")
+            return
+
+        if data.startswith("os_file_"):
+            idx = int(data.split("_")[2])
+            files = st.get("files", [])
+            if idx < 0 or idx >= len(files):
+                bot.answer_callback_query(call.id, "Файл не найден", show_alert=True)
+                return
+            fobj = files[idx]
+            safe_edit_message(call, f"*{fobj.get('name', 'file.txt')}*\n\n{fobj.get('content', '(пусто)')[:1500]}", reply_markup=_telos_files_kb(st), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_notes":
+            notes = st.get("notes", [])
+            body = "\n".join([f"{i+1}. {str(x)[:80]}" for i, x in enumerate(notes[:10])]) if notes else "(нет заметок)"
+            safe_edit_message(call, "*Заметки*\n\n" + body, reply_markup=_telos_notes_kb(st), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_notes_add":
+            telos_input_wait[uid] = {"action": "new_note"}
+            bot.answer_callback_query(call.id)
+            bot.send_message(uid, "Введите текст заметки:")
+            return
+
+        if data == "os_notes_clear":
+            st["notes"] = []
+            _telos_save_state(uid, st)
+            safe_edit_message(call, "*Заметки*\n\n(нет заметок)", reply_markup=_telos_notes_kb(st), parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Заметки очищены")
+            return
+
+        if data.startswith("os_note_"):
+            idx = int(data.split("_")[2])
+            notes = st.get("notes", [])
+            if idx < 0 or idx >= len(notes):
+                bot.answer_callback_query(call.id, "Заметка не найдена", show_alert=True)
+                return
+            safe_edit_message(call, f"*Заметка #{idx+1}*\n\n{str(notes[idx])[:1500]}", reply_markup=_telos_notes_kb(st), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_games":
+            safe_edit_message(call, "*Игры внутри TELOS*\nВыберите игру:", reply_markup=_telos_games_kb(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_game_coin":
+            bot.answer_callback_query(call.id, random.choice(["🪙 Орёл", "🪙 Решка"]), show_alert=True)
+            return
+
+        if data == "os_game_slot":
+            symbols = ["🍒", "🍋", "🍉", "⭐", "💎", "7️⃣"]
+            roll = " | ".join([random.choice(symbols) for _ in range(3)])
+            picks = roll.split(" | ")
+            if picks[0] == picks[1] == picks[2]:
+                result = "🎉 Джекпот!"
+            elif len(set(picks)) == 2:
+                result = "✨ Почти!"
+            else:
+                result = "🎲 Ещё раз?"
+            bot.answer_callback_query(call.id, f"{roll}\n{result}", show_alert=True)
+            return
+
+        if data == "os_game_rps":
+            safe_edit_message(call, "*Камень-ножницы-бумага*\nВыберите ход:", reply_markup=_telos_rps_kb(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data.startswith("os_game_rps_"):
+            user_move = data.split("_")[3]
+            bot_move = random.choice(["rock", "paper", "scissors"])
+            icon = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+            if user_move == bot_move:
+                res = "🤝 Ничья"
+            elif (user_move == "rock" and bot_move == "scissors") or (user_move == "paper" and bot_move == "rock") or (user_move == "scissors" and bot_move == "paper"):
+                res = "🎉 Победа"
+            else:
+                res = "😢 Поражение"
+            bot.answer_callback_query(call.id, f"Вы: {icon[user_move]} | Бот: {icon[bot_move]}\n{res}", show_alert=True)
+            return
+
+        if data == "os_game_guess":
+            st.setdefault("mini_games", {})["guess_target"] = random.randint(1, 10)
+            _telos_save_state(uid, st)
+            safe_edit_message(call, "*Угадай число*\nВыберите число от 1 до 10:", reply_markup=_telos_guess_kb(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_game_dice":
+            value = random.randint(1, 6)
+            faces = {1: "⚀", 2: "⚁", 3: "⚂", 4: "⚃", 5: "⚄", 6: "⚅"}
+            bot.answer_callback_query(call.id, f"🎲 Выпало: {faces[value]} ({value})", show_alert=True)
+            return
+
+        if data.startswith("os_game_guess_pick_"):
+            try:
+                pick = int(data.split("_")[4])
+            except Exception:
+                bot.answer_callback_query(call.id, "Ошибка выбора", show_alert=True)
+                return
+            target = st.setdefault("mini_games", {}).get("guess_target")
+            if not isinstance(target, int):
+                bot.answer_callback_query(call.id, "Сначала запустите игру «Угадай число»", show_alert=True)
+                return
+            if pick == target:
+                st["mini_games"]["guess_target"] = None
+                _telos_save_state(uid, st)
+                bot.answer_callback_query(call.id, f"🎉 Верно! Это {target}", show_alert=True)
+            else:
+                hint = "меньше" if pick > target else "больше"
+                bot.answer_callback_query(call.id, f"❌ Неверно. Загаданное число {hint}.", show_alert=True)
+            return
+
+        if data == "os_terminal":
+            hist = st.get("terminal_history", [])
+            body = "\n".join(hist[-8:]) if hist else "(пусто)"
+            safe_edit_message(call, "*Терминал*\n\n`" + body + "`", reply_markup=_telos_terminal_kb(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data.startswith("os_term_"):
+            cmd = data.replace("os_term_", "")
+            if cmd == "input":
+                telos_input_wait[uid] = {"action": "term_input"}
+                bot.answer_callback_query(call.id)
+                bot.send_message(uid, "Введите команду терминала:")
+                return
+            out = _telos_run_command(st, cmd)
+            st.setdefault("terminal_history", []).append(f"$ {cmd}")
+            st["terminal_history"].append(out)
+            st["terminal_history"] = st["terminal_history"][-20:]
+            _telos_save_state(uid, st)
+            safe_edit_message(call, "*Терминал*\n\n`" + "\n".join(st["terminal_history"][-8:]) + "`", reply_markup=_telos_terminal_kb(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_settings":
+            s = st.get("settings", {})
+            safe_edit_message(
+                call,
+                "*Настройки*\n\n"
+                f"Имя ОС: *{s.get('os_name', 'TELOS')}*\n"
+                f"Тема: *{s.get('theme', 'classic')}*",
+                reply_markup=_telos_settings_kb(),
+                parse_mode="Markdown",
+            )
+            bot.answer_callback_query(call.id)
+            return
+
+        if data == "os_set_name":
+            telos_input_wait[uid] = {"action": "set_os_name"}
+            bot.answer_callback_query(call.id)
+            bot.send_message(uid, "Введите новое имя ОС (до 24 символов):")
+            return
+
+        if data == "os_set_theme":
+            theme = st.get("settings", {}).get("theme", "classic")
+            st["settings"]["theme"] = "neon" if theme == "classic" else "classic"
+            _telos_save_state(uid, st)
+            bot.answer_callback_query(call.id, f"Тема: {st['settings']['theme']}")
+            safe_edit_message(call, _telos_home_text(uid), reply_markup=telos_main_menu(), parse_mode="Markdown")
+            return
+
+        if data == "os_set_reset":
+            st = _telos_default_state()
+            _telos_save_state(uid, st)
+            bot.answer_callback_query(call.id, "TELOS сброшен")
+            safe_edit_message(call, _telos_home_text(uid), reply_markup=telos_main_menu(), parse_mode="Markdown")
+            return
+
+        if data == "os_shutdown":
+            st["booted"] = False
+            _telos_save_state(uid, st)
+            boot_kb = types.InlineKeyboardMarkup()
+            boot_kb.add(types.InlineKeyboardButton("▶️ Запустить", callback_data="os_boot"))
+            safe_edit_message(call, "⏻ *TELOS выключен*", reply_markup=boot_kb, parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
@@ -3502,9 +4618,13 @@ def slot_spin(call):
     roll = [random.choice(symbols) for _ in range(3)]
     text = f"| {' | '.join(roll)} |"
     if roll.count("7️⃣") == 3:
-        text += "\n🎉 Джекпот!"
+        text += "\n💥💥💥"
     elif len(set(roll)) == 1:
-        text += "\n🎉 Три одинаковых!"
+        text += "\n✨✨✨"
+    elif len(set(roll)) == 2:
+        text += "\n✨✨"
+    else:
+        text += "\n🎲"
     bot.edit_message_text(f"🎰 результат\n {text}\n", inline_message_id=call.inline_message_id,
                           reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🎰 Ещё раз", callback_data="slot_spin")))
     bot.answer_callback_query(call.id, "Крутим 🎲")
@@ -3537,6 +4657,58 @@ def play_inline_easter_egg(inline_id):
             time.sleep(0.5)
         except:
             break
+
+@bot.message_handler(func=lambda m: m.from_user.id in telos_input_wait)
+def telos_save_input(message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+    wait = telos_input_wait.pop(uid, None)
+    if not wait:
+        return
+
+    st = _telos_get_state(uid)
+    action = wait.get("action")
+
+    if action == "new_note":
+        if text:
+            st.setdefault("notes", []).append(text[:500])
+            st["notes"] = st["notes"][-100:]
+            _telos_save_state(uid, st)
+            bot.send_message(uid, "✅ Заметка добавлена")
+        else:
+            bot.send_message(uid, "❌ Пустая заметка не сохранена")
+        return
+
+    if action == "new_file":
+        if "|" in text:
+            name, content = text.split("|", 1)
+            name = name.strip()[:40] or f"file_{len(st.get('files', []))+1}.txt"
+            content = content.strip()[:1500]
+        else:
+            name = f"file_{len(st.get('files', []))+1}.txt"
+            content = text[:1500]
+        st.setdefault("files", []).append({"name": name, "content": content})
+        st["files"] = st["files"][-100:]
+        _telos_save_state(uid, st)
+        bot.send_message(uid, f"✅ Файл `{name}` сохранён", parse_mode="Markdown")
+        return
+
+    if action == "set_os_name":
+        st.setdefault("settings", {})["os_name"] = (text[:24] if text else "TELOS")
+        _telos_save_state(uid, st)
+        bot.send_message(uid, f"✅ Имя ОС: *{st['settings']['os_name']}*", parse_mode="Markdown")
+        return
+
+    if action == "term_input":
+        out = _telos_run_command(st, text)
+        st.setdefault("terminal_history", []).append(f"$ {text}")
+        st["terminal_history"].append(out)
+        st["terminal_history"] = st["terminal_history"][-20:]
+        _telos_save_state(uid, st)
+        bot.send_message(uid, f"`$ {text}`\n`{out}`", parse_mode="Markdown")
+        return
+
+    bot.send_message(uid, "❌ Неизвестное действие TELOS")
 
 @bot.message_handler(func=lambda m: m.from_user.id in system_notify_wait)
 def sys_save_value(message):
